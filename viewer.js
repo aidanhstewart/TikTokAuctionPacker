@@ -1,5 +1,11 @@
 // viewer.js
 
+const THERMAL = {
+  widthIn: 4,
+  heightIn: 6,
+  dpi: 300
+};
+
 (async function () {
   const params = new URLSearchParams(window.location.search);
   const pdfUrl = params.get("pdf");
@@ -35,42 +41,42 @@
 
   const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
   const container = document.getElementById("pdfContainer");
-  const scale = 2.5;
-  const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+
+  const targetW = THERMAL.widthIn * THERMAL.dpi;
+  const targetH = THERMAL.heightIn * THERMAL.dpi;
 
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum);
+    const baseViewport = page.getViewport({ scale: 1 });
+    const scale = targetW / baseViewport.width;
     const viewport = page.getViewport({ scale });
 
     const wrapper = document.createElement("div");
     wrapper.className = "pageWrapper";
-    wrapper.style.width = viewport.width + "px";
-    wrapper.style.height = viewport.height + "px";
+    wrapper.style.width = THERMAL.widthIn + "in";
+    wrapper.style.height = THERMAL.heightIn + "in";
 
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d", { alpha: false });
 
-    canvas.width = Math.floor(viewport.width * pixelRatio);
-    canvas.height = Math.floor(viewport.height * pixelRatio);
-    canvas.style.width = viewport.width + "px";
-    canvas.style.height = viewport.height + "px";
+    canvas.width = targetW;
+    canvas.height = targetH;
+    canvas.style.width = THERMAL.widthIn + "in";
+    canvas.style.height = THERMAL.heightIn + "in";
 
-    context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "high";
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, targetW, targetH);
 
     wrapper.appendChild(canvas);
     container.appendChild(wrapper);
 
     await page.render({
       canvasContext: context,
-      viewport,
-      transform:
-        pixelRatio !== 1
-          ? [pixelRatio, 0, 0, pixelRatio, 0, 0]
-          : undefined
+      viewport
     }).promise;
 
     const textContent = await page.getTextContent();
+    const columnLayout = getTableColumnLayout(textContent);
     const packingItems = parseTikTokPackingItems(textContent);
 
     for (const {
@@ -81,22 +87,26 @@
       const productName = lookupProduct(maps, sheetIndex, saleNumber);
       if (!productName) continue;
 
-      const bounds = getProductNameBounds(productItems, viewport);
+      const bounds = getProductNameBounds(
+        productItems,
+        viewport,
+        columnLayout.skuColumnLeftPdf
+      );
 
       const mask = document.createElement("div");
       mask.className = "overlayMask";
-      mask.style.left = bounds.left + "px";
-      mask.style.top = bounds.top + "px";
-      mask.style.width = bounds.width + "px";
-      mask.style.height = bounds.height + "px";
+      mask.style.left = pxToIn(bounds.left);
+      mask.style.top = pxToIn(bounds.top);
+      mask.style.width = pxToIn(bounds.width);
+      mask.style.height = pxToIn(bounds.height);
 
       const overlay = document.createElement("div");
       overlay.className = "overlayText";
-      overlay.style.left = bounds.left + "px";
-      overlay.style.top = bounds.top + "px";
-      overlay.style.width = bounds.width + "px";
-      overlay.style.height = bounds.height + "px";
-      overlay.style.fontSize = bounds.fontSize + "px";
+      overlay.style.left = pxToIn(bounds.left);
+      overlay.style.top = pxToIn(bounds.top);
+      overlay.style.width = pxToIn(bounds.width);
+      overlay.style.height = pxToIn(bounds.height);
+      overlay.style.fontSize = pxToIn(bounds.fontSize);
       overlay.style.lineHeight = bounds.lineHeight;
       overlay.innerText = productName;
 
@@ -110,13 +120,26 @@
   });
 })();
 
-function getProductNameBounds(productItems, viewport) {
+function pxToIn(px) {
+  return px / THERMAL.dpi + "in";
+}
+
+function getProductNameBounds(productItems, viewport, skuColumnLeftPdf) {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
   let fontSizeTotal = 0;
   let fontSizeCount = 0;
+
+  let productColumnRight = Infinity;
+
+  if (skuColumnLeftPdf != null) {
+    const edge = pdfjsLib.Util.transform(viewport.transform, [
+      1, 0, 0, 1, skuColumnLeftPdf, 0
+    ]);
+    productColumnRight = edge[4];
+  }
 
   for (const item of productItems) {
     const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
@@ -137,15 +160,20 @@ function getProductNameBounds(productItems, viewport) {
     fontSizeCount++;
   }
 
+  maxX = Math.min(maxX, productColumnRight);
+
   const pad = 2;
   const fontSize = fontSizeCount
     ? fontSizeTotal / fontSizeCount
     : 10 * viewport.scale;
 
+  const left = minX - pad;
+  const width = Math.max(maxX - minX + pad * 2, 0);
+
   return {
-    left: minX - pad,
+    left,
     top: minY - pad,
-    width: maxX - minX + pad * 2,
+    width,
     height: maxY - minY + pad * 2,
     fontSize,
     lineHeight: 1.05

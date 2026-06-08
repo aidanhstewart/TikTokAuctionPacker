@@ -48,6 +48,29 @@ function groupProductLines(sortedProducts) {
   return lines;
 }
 
+function getTableColumnLayout(textContent) {
+  const items = textContent.items.filter(item => item.str && item.str.trim());
+
+  const sellerSkuLabel = findLabelItem(items, /Seller\s*SKU/i);
+  const skuLabel = items.find(item => {
+    const text = item.str.trim();
+    return text === "SKU" || (text.includes("SKU") && !/Seller/i.test(text));
+  });
+
+  const columnXs = [
+    sellerSkuLabel?.transform[4],
+    skuLabel?.transform[4]
+  ].filter(value => value != null);
+
+  if (columnXs.length === 0) {
+    return { skuColumnLeftPdf: null };
+  }
+
+  return {
+    skuColumnLeftPdf: Math.min(...columnXs) - 6
+  };
+}
+
 function isTableEndText(text) {
   return (
     text.includes("Qty Total") ||
