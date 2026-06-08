@@ -3,7 +3,7 @@
 const THERMAL = {
   widthIn: 4,
   heightIn: 6,
-  dpi: 300
+  dpi: 600
 };
 
 (async function () {
@@ -41,7 +41,6 @@ const THERMAL = {
 
   const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
   const container = document.getElementById("pdfContainer");
-
   const targetW = THERMAL.widthIn * THERMAL.dpi;
   const targetH = THERMAL.heightIn * THERMAL.dpi;
 
@@ -53,16 +52,13 @@ const THERMAL = {
 
     const wrapper = document.createElement("div");
     wrapper.className = "pageWrapper";
-    wrapper.style.width = THERMAL.widthIn + "in";
-    wrapper.style.height = THERMAL.heightIn + "in";
 
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d", { alpha: false });
 
     canvas.width = targetW;
     canvas.height = targetH;
-    canvas.style.width = THERMAL.widthIn + "in";
-    canvas.style.height = THERMAL.heightIn + "in";
+    canvas.className = "pageCanvas";
 
     context.fillStyle = "#ffffff";
     context.fillRect(0, 0, targetW, targetH);
@@ -72,7 +68,8 @@ const THERMAL = {
 
     await page.render({
       canvasContext: context,
-      viewport
+      viewport,
+      intent: "print"
     }).promise;
 
     const textContent = await page.getTextContent();
@@ -93,35 +90,84 @@ const THERMAL = {
         columnLayout.skuColumnLeftPdf
       );
 
-      const mask = document.createElement("div");
-      mask.className = "overlayMask";
-      mask.style.left = pxToIn(bounds.left);
-      mask.style.top = pxToIn(bounds.top);
-      mask.style.width = pxToIn(bounds.width);
-      mask.style.height = pxToIn(bounds.height);
-
-      const overlay = document.createElement("div");
-      overlay.className = "overlayText";
-      overlay.style.left = pxToIn(bounds.left);
-      overlay.style.top = pxToIn(bounds.top);
-      overlay.style.width = pxToIn(bounds.width);
-      overlay.style.height = pxToIn(bounds.height);
-      overlay.style.fontSize = pxToIn(bounds.fontSize);
-      overlay.style.lineHeight = bounds.lineHeight;
-      overlay.innerText = productName;
-
-      wrapper.appendChild(mask);
-      wrapper.appendChild(overlay);
+      drawProductOverlay(context, bounds, productName);
     }
   }
 
   document.getElementById("printBtn").addEventListener("click", () => {
-    window.print();
+    flattenPagesForPrint();
+    setTimeout(() => window.print(), 50);
   });
+
+  window.addEventListener("afterprint", restorePagesAfterPrint);
 })();
 
-function pxToIn(px) {
-  return px / THERMAL.dpi + "in";
+function drawProductOverlay(context, bounds, productName) {
+  context.fillStyle = "#ffffff";
+  context.fillRect(bounds.left, bounds.top, bounds.width, bounds.height);
+
+  context.fillStyle = "#000000";
+  context.textBaseline = "top";
+  context.font = `bold ${bounds.fontSize}px Helvetica, Arial, sans-serif`;
+
+  drawWrappedText(
+    context,
+    productName,
+    bounds.left,
+    bounds.top + 1,
+    bounds.width,
+    bounds.fontSize * bounds.lineHeight
+  );
+}
+
+function drawWrappedText(context, text, x, y, maxWidth, lineHeight) {
+  const words = text.split(/\s+/);
+  let line = "";
+  let currentY = y;
+
+  for (const word of words) {
+    const testLine = line ? `${line} ${word}` : word;
+
+    if (context.measureText(testLine).width > maxWidth && line) {
+      context.fillText(line, x, currentY);
+      line = word;
+      currentY += lineHeight;
+    } else {
+      line = testLine;
+    }
+  }
+
+  if (line) {
+    context.fillText(line, x, currentY);
+  }
+}
+
+function flattenPagesForPrint() {
+  document.querySelectorAll(".pageWrapper").forEach(wrapper => {
+    if (wrapper.dataset.flattened === "1") return;
+
+    const canvas = wrapper.querySelector("canvas");
+    if (!canvas) return;
+
+    const img = document.createElement("img");
+    img.className = "printImage";
+    img.src = canvas.toDataURL("image/png");
+    img.alt = "Packing list";
+    img.style.width = THERMAL.widthIn + "in";
+    img.style.height = THERMAL.heightIn + "in";
+
+    canvas.classList.add("screenOnly");
+    wrapper.appendChild(img);
+    wrapper.dataset.flattened = "1";
+  });
+}
+
+function restorePagesAfterPrint() {
+  document.querySelectorAll(".pageWrapper").forEach(wrapper => {
+    wrapper.querySelectorAll(".printImage").forEach(img => img.remove());
+    wrapper.querySelector("canvas")?.classList.remove("screenOnly");
+    delete wrapper.dataset.flattened;
+  });
 }
 
 function getProductNameBounds(productItems, viewport, skuColumnLeftPdf) {
@@ -167,13 +213,10 @@ function getProductNameBounds(productItems, viewport, skuColumnLeftPdf) {
     ? fontSizeTotal / fontSizeCount
     : 10 * viewport.scale;
 
-  const left = minX - pad;
-  const width = Math.max(maxX - minX + pad * 2, 0);
-
   return {
-    left,
+    left: minX - pad,
     top: minY - pad,
-    width,
+    width: Math.max(maxX - minX + pad * 2, 0),
     height: maxY - minY + pad * 2,
     fontSize,
     lineHeight: 1.05

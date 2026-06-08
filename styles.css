@@ -32,38 +32,17 @@ body {
   height: 6in;
 }
 
-canvas {
+.pageCanvas {
   display: block;
-  background: white;
   width: 4in;
   height: 6in;
-}
-
-.overlayMask {
-  position: absolute;
   background: white;
-  pointer-events: none;
-  z-index: 9998;
 }
 
-.overlayText {
-  position: absolute;
-  background: transparent;
-  color: black;
-  box-sizing: border-box;
-  padding: 0;
-  margin: 0;
-
-  font-family: Helvetica, Arial, sans-serif;
-  font-weight: bold;
-  text-align: left;
-
-  pointer-events: none;
-  z-index: 9999;
-
-  white-space: normal;
-  overflow: hidden;
-  word-break: break-word;
+.printImage {
+  display: none;
+  width: 4in;
+  height: 6in;
 }
 
 @media print {
@@ -72,8 +51,12 @@ canvas {
     margin: 0;
   }
 
+  html,
   body {
     margin: 0;
+    padding: 0;
+    width: 4in;
+    height: 6in;
     background: white;
   }
 
@@ -83,10 +66,12 @@ canvas {
 
   #pdfContainer {
     padding: 0;
+    margin: 0;
   }
 
   .pageWrapper {
     margin: 0;
+    padding: 0;
     box-shadow: none;
     page-break-after: always;
     width: 4in !important;
@@ -94,14 +79,16 @@ canvas {
     overflow: hidden;
   }
 
-  canvas {
-    width: 4in !important;
-    height: 6in !important;
-    box-shadow: none;
+  .screenOnly {
+    display: none !important;
   }
 
-  .overlayMask,
-  .overlayText {
+  .printImage {
+    display: block !important;
+    width: 4in !important;
+    height: 6in !important;
+    max-width: none !important;
+    max-height: none !important;
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
