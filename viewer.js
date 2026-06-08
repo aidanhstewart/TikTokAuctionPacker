@@ -87,7 +87,8 @@ const MONO_THRESHOLD = 165;
       saleNumber,
       sheetIndex,
       saleItem,
-      productItems
+      productItems,
+      liveTitle
     } of packingItems) {
       const bounds = getLineItemBounds(
         productItems,
@@ -96,8 +97,17 @@ const MONO_THRESHOLD = 165;
         columnLayout
       );
 
-      const lookup = lookupProductSmart(maps, sheetIndex, saleNumber);
-      drawLineItemOverlay(context, bounds, lookup.productName);
+      const productName = lookupProduct(maps, sheetIndex, saleNumber);
+
+      console.log("[TikTokPacker]", {
+        page: pageNum,
+        saleNumber,
+        sheetIndex,
+        detectedTitle: liveTitle,
+        lookedUpProduct: productName
+      });
+
+      drawLineItemOverlay(context, bounds, productName, sheetIndex);
     }
 
     maskSkuColumnHeader(context, textContent, viewport, columnLayout);
@@ -114,64 +124,36 @@ const MONO_THRESHOLD = 165;
 })();
 
 function maskGenericLiveTitles(context, textContent, viewport, layout) {
-  if (layout.productColumnRightPdf == null) return;
+  if (
+    layout.skuColumnLeftPdf == null ||
+    layout.skuColumnRightPdf == null ||
+    layout.productColumnRightPdf == null
+  ) {
+    return;
+  }
 
-  const productRight = pdfXToViewport(
-    viewport,
-    layout.productColumnRightPdf
-  );
+  const skuLeft = pdfXToViewport(viewport, layout.skuColumnLeftPdf);
+  const skuRight = pdfXToViewport(viewport, layout.skuColumnRightPdf);
 
   context.fillStyle = "#ffffff";
 
   for (const item of textContent.items) {
     if (!item.str || !isGenericLiveTitle(item.str)) continue;
-    if (item.transform[4] >= layout.productColumnRightPdf) continue;
+    if (item.transform[4] < layout.productColumnRightPdf) continue;
+    if (item.transform[4] >= layout.skuColumnRightPdf + 20) continue;
 
     const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-    const scaleX = Math.hypot(tx[0], tx[1]) || viewport.scale;
     const scaleY = Math.hypot(tx[2], tx[3]) || viewport.scale;
     const fontSize = scaleY || (item.height || 10) * viewport.scale;
-    const width = Math.max((item.width || 0) * scaleX, fontSize * 0.45);
-    const left = tx[4] - 2;
     const top = tx[5] - fontSize * 0.82 - 2;
     const height = fontSize * 1.05 + 4;
-    const clampedWidth = Math.min(width + 4, productRight - left);
 
-    if (clampedWidth > 0) {
-      context.fillRect(
-        Math.round(left),
-        Math.round(top),
-        Math.round(clampedWidth),
-        Math.round(height)
-      );
-    }
-  }
-
-  if (
-    layout.skuColumnLeftPdf != null &&
-    layout.skuColumnRightPdf != null
-  ) {
-    const skuLeft = pdfXToViewport(viewport, layout.skuColumnLeftPdf);
-    const skuRight = pdfXToViewport(viewport, layout.skuColumnRightPdf);
-
-    for (const item of textContent.items) {
-      if (!item.str || !isGenericLiveTitle(item.str)) continue;
-      if (item.transform[4] < layout.productColumnRightPdf) continue;
-      if (item.transform[4] >= layout.skuColumnRightPdf + 20) continue;
-
-      const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-      const scaleY = Math.hypot(tx[2], tx[3]) || viewport.scale;
-      const fontSize = scaleY || (item.height || 10) * viewport.scale;
-      const top = tx[5] - fontSize * 0.82 - 2;
-      const height = fontSize * 1.05 + 4;
-
-      context.fillRect(
-        Math.round(skuLeft),
-        Math.round(top),
-        Math.round(skuRight - skuLeft),
-        Math.round(height)
-      );
-    }
+    context.fillRect(
+      Math.round(skuLeft),
+      Math.round(top),
+      Math.round(skuRight - skuLeft),
+      Math.round(height)
+    );
   }
 }
 
@@ -191,29 +173,23 @@ function attachPreviewCanvas(wrapper, hiResCanvas, targetW, targetH) {
   wrapper.appendChild(preview);
 }
 
-function drawLineItemOverlay(context, bounds, productName) {
-  const product = bounds.product;
-  const left = Math.round(product.left);
-  const top = Math.round(product.top);
-  const width = Math.round(product.width);
-  const height = Math.round(product.height);
+function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
+  if (!bounds.skuColumn) return;
+
+  const sku = bounds.skuColumn;
+  const skuLeft = Math.round(sku.left);
+  const skuTop = Math.round(sku.top);
+  const skuWidth = Math.round(sku.width);
+  const skuHeight = Math.round(sku.height);
 
   context.fillStyle = "#ffffff";
-  context.fillRect(left, top, width, height);
+  context.fillRect(skuLeft, skuTop, skuWidth, skuHeight);
 
-  if (bounds.skuColumn) {
-    const sku = bounds.skuColumn;
-    context.fillRect(
-      Math.round(sku.left),
-      Math.round(sku.top),
-      Math.round(sku.width),
-      Math.round(sku.height)
-    );
-  }
-
-  if (!productName) return;
-
-  const fontSize = Math.round(product.fontSize);
+  const fontSize = Math.round(bounds.product.fontSize);
+  const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
+  const overlayText = productName
+    ? `${sheetTag}${productName}`
+    : `${sheetTag}(no match)`;
 
   context.fillStyle = "#000000";
   context.textBaseline = "top";
@@ -221,11 +197,11 @@ function drawLineItemOverlay(context, bounds, productName) {
 
   drawWrappedText(
     context,
-    productName,
-    left,
-    top + 1,
-    width,
-    fontSize * product.lineHeight
+    overlayText,
+    skuLeft + 2,
+    skuTop + 1,
+    Math.max(skuWidth - 4, 0),
+    fontSize * bounds.product.lineHeight
   );
 }
 

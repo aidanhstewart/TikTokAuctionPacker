@@ -62,38 +62,6 @@ async function loadSheetMaps(sheetUrl1, sheetUrl2) {
   return { 1: map1, 2: map2 };
 }
 
-
 function lookupProduct(maps, sheetIndex, saleNumber) {
   return (maps[sheetIndex] || {})[saleNumber] || null;
-}
-
-function lookupProductSmart(maps, preferredSheetIndex, saleNumber) {
-  const sku = String(saleNumber || "").trim();
-  const preferred = preferredSheetIndex === 2 ? 2 : 1;
-  const other = preferred === 2 ? 1 : 2;
-
-  const preferredProduct = lookupProduct(maps, preferred, sku);
-  const otherProduct = lookupProduct(maps, other, sku);
-
-  if (preferredProduct) {
-    return {
-      productName: preferredProduct,
-      sheetIndex: preferred,
-      foundIn: otherProduct ? "both" : "preferred"
-    };
-  }
-
-  if (otherProduct) {
-    return {
-      productName: otherProduct,
-      sheetIndex: other,
-      foundIn: "fallback"
-    };
-  }
-
-  return {
-    productName: null,
-    sheetIndex: preferred,
-    foundIn: "none"
-  };
 }

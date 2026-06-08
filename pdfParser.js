@@ -120,41 +120,6 @@ function getPageSheetIndex(textContent) {
   return getLiveSheetIndex(liveMatch[1], liveMatch[1].split(/\s+/));
 }
 
-function applySkuResetSheetInference(results) {
-  let activeSheet = 1;
-  let maxSkuSeen = 0;
-
-  return results.map(item => {
-    const skuNumber = parseInt(item.saleNumber, 10);
-    const liveText = String(item.liveTitle || "").replace(/\s+/g, " ").trim();
-    const explicitlyScreen2 = /SCREEN\s*2\b/i.test(liveText);
-    const explicitlyScreen1 = /FRIDAY\s+LIVE\s*-\s*AS\s+SEEN\s+ON\s+SCREEN\b/i.test(liveText) && !explicitlyScreen2;
-
-    if (explicitlyScreen2) {
-      activeSheet = 2;
-    } else if (
-      activeSheet === 1 &&
-      Number.isFinite(skuNumber) &&
-      maxSkuSeen >= 100 &&
-      skuNumber <= maxSkuSeen - 20
-    ) {
-      // TikTok resets Seller SKU numbers when the second live starts.
-      // Example: 1, 7, 45, 88, 90, 93, 176, then 59, 88.
-      // Once this reset is seen, the remaining duplicate SKUs should use Sheet 2.
-      activeSheet = 2;
-    }
-
-    if (Number.isFinite(skuNumber)) {
-      maxSkuSeen = Math.max(maxSkuSeen, skuNumber);
-    }
-
-    return {
-      ...item,
-      sheetIndex: explicitlyScreen1 && activeSheet === 1 ? 1 : activeSheet
-    };
-  });
-}
-
 function parseTikTokPackingItems(textContent) {
   const items = textContent.items.filter(item => item.str && item.str.trim());
   const layout = getTableColumnLayout(textContent);
@@ -180,7 +145,6 @@ function parseTikTokPackingItems(textContent) {
   const tableBottomY = qtyTotalLabel?.transform[5] ?? 0;
   const sellerSkuX = sellerSkuLabel.transform[4];
   const productColumnRight = layout.productColumnRightPdf ?? sellerSkuX - 20;
-  const rowTolerance = 5;
   const pageSheetIndex = getPageSheetIndex(textContent);
 
   const dataItems = items.filter(item => {
@@ -188,77 +152,100 @@ function parseTikTokPackingItems(textContent) {
     return y < headerY - 2 && y > tableBottomY + 2;
   });
 
-  const saleItems = dataItems.filter(item => {
+  const hasAnySale = dataItems.some(item => {
     if (!/^\d+$/.test(item.str.trim())) return false;
     return Math.abs(item.transform[4] - sellerSkuX) <= 40;
   });
 
-  if (saleItems.length === 0) {
+  if (!hasAnySale) {
     return parseTikTokPackingItemsFromRows(textContent.items);
   }
+
+  return buildPackingItemsFromOrderedItems(
+    dataItems,
+    sellerSkuX,
+    productColumnRight,
+    pageSheetIndex
+  );
+}
+
+function buildPackingItemsFromOrderedItems(
+  dataItems,
+  sellerSkuX,
+  productColumnRight,
+  pageSheetIndex
+) {
+  const saleItems = dataItems.filter(item => {
+    const text = item.str.trim();
+    if (!/^\d+$/.test(text)) return false;
+    return Math.abs(item.transform[4] - sellerSkuX) <= 40;
+  });
+
+  if (saleItems.length === 0) return [];
 
   const sortedSales = [...saleItems].sort(
     (a, b) => b.transform[5] - a.transform[5]
   );
 
-  const results = [];
-
-  sortedSales.forEach((saleItem, idx) => {
-    const saleY = saleItem.transform[5];
+  const rowBounds = sortedSales.map((sale, idx) => {
+    const saleY = sale.transform[5];
     const upperBound =
       idx === 0
-        ? headerY - 2
-        : sortedSales[idx - 1].transform[5] - rowTolerance;
-    const lowerBound = saleY - rowTolerance;
+        ? Infinity
+        : (sortedSales[idx - 1].transform[5] + saleY) / 2;
+    const lowerBound =
+      idx === sortedSales.length - 1
+        ? -Infinity
+        : (saleY + sortedSales[idx + 1].transform[5]) / 2;
+    return { upperBound, lowerBound };
+  });
 
-    const allProductItemsForRow = dataItems.filter(item => {
+  let lastDetectedSheetIndex = null;
+  const results = [];
+
+  sortedSales.forEach((sale, idx) => {
+    const { upperBound, lowerBound } = rowBounds[idx];
+
+    const titleItems = dataItems.filter(item => {
+      const text = item.str.trim();
+      if (!text) return false;
+      if (item.transform[4] >= productColumnRight) return false;
+      if (/^\d+$/.test(text)) return false;
+      if (isTableEndText(text)) return false;
+
       const y = item.transform[5];
-
-      return (
-        item.transform[4] < productColumnRight &&
-        y <= upperBound &&
-        y >= lowerBound &&
-        !/^\d+$/.test(item.str.trim())
-      );
+      return y > lowerBound && y < upperBound;
     });
 
-    const overlayProductItems = allProductItemsForRow.filter(
-      item => !isGenericLiveTitle(item.str)
-    );
-
-    const sortedAllProducts = allProductItemsForRow.sort(
+    titleItems.sort(
       (a, b) =>
         b.transform[5] - a.transform[5] ||
         a.transform[4] - b.transform[4]
     );
 
-    const sortedProducts = overlayProductItems.sort(
-      (a, b) =>
-        b.transform[5] - a.transform[5] ||
-        a.transform[4] - b.transform[4]
-    );
+    const titleLines = groupProductLines(titleItems);
+    const titleText = titleLines.join(" ");
 
-    const productLines = groupProductLines(sortedAllProducts);
-    const liveTitle = productLines.join(" ");
-
-    if (isTableEndText(liveTitle)) return;
-
-    let sheetIndex = getLiveSheetIndex(liveTitle, productLines);
-
-    if (!/LIVE|SCREEN/i.test(liveTitle)) {
+    let sheetIndex;
+    if (/LIVE|SCREEN/i.test(titleText)) {
+      sheetIndex = getLiveSheetIndex(titleText, titleLines);
+      lastDetectedSheetIndex = sheetIndex;
+    } else if (lastDetectedSheetIndex != null) {
+      sheetIndex = lastDetectedSheetIndex;
+    } else {
       sheetIndex = pageSheetIndex;
     }
 
     results.push({
-      saleNumber: saleItem.str.trim(),
-      saleItem,
-      liveTitle,
+      saleNumber: sale.str.trim(),
+      saleItem: sale,
+      liveTitle: titleText,
       sheetIndex,
-      productItems: sortedProducts
+      productItems: titleItems
     });
   });
 
-  return applySkuResetSheetInference(results);
+  return results;
 }
 
 function parseTikTokPackingItemsFromRows(rawItems) {
@@ -282,72 +269,21 @@ function parseTikTokPackingItemsFromRows(rawItems) {
     sellerSkuX ?? Infinity,
     skuX ?? Infinity
   );
+  const productColumnRight = columnCutoff - 8;
 
-  const results = [];
-  const saleRowIndices = [];
-
+  const dataItems = [];
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const row = rows[i];
     if (isTableEndText(row.text)) break;
-
-    const sellerSkuItem = findItemAtColumn(row, sellerSkuX, 40);
-    if (!sellerSkuItem || !/^\d+$/.test(sellerSkuItem.str.trim())) continue;
-
-    saleRowIndices.push(i);
+    dataItems.push(...row.items);
   }
 
-  saleRowIndices.forEach((rowIdx, idx) => {
-    const row = rows[rowIdx];
-    const sellerSkuItem = findItemAtColumn(row, sellerSkuX, 40);
-    const saleNumber = sellerSkuItem.str.trim();
-    const prevRowIdx =
-      idx === 0 ? headerIdx : saleRowIndices[idx - 1];
-
-    const allProductItemsForRow = [];
-
-    for (let j = rowIdx; j > prevRowIdx; j--) {
-      allProductItemsForRow.push(
-        ...rows[j].items.filter(
-          item =>
-            item.transform[4] < columnCutoff - 8 &&
-            !/^\d+$/.test(item.str.trim())
-        )
-      );
-    }
-
-    const overlayProductItems = allProductItemsForRow.filter(
-      item => !isGenericLiveTitle(item.str)
-    );
-
-    const sortedAllProducts = allProductItemsForRow.sort(
-      (a, b) =>
-        b.transform[5] - a.transform[5] ||
-        a.transform[4] - b.transform[4]
-    );
-
-    const sortedProducts = overlayProductItems.sort(
-      (a, b) =>
-        b.transform[5] - a.transform[5] ||
-        a.transform[4] - b.transform[4]
-    );
-    const productLines = groupProductLines(sortedAllProducts);
-    const liveTitle = productLines.join(" ");
-    let sheetIndex = getLiveSheetIndex(liveTitle, productLines);
-
-    if (!/LIVE|SCREEN/i.test(liveTitle)) {
-      sheetIndex = getPageSheetIndex({ items: rawItems });
-    }
-
-    results.push({
-      saleNumber,
-      saleItem: sellerSkuItem,
-      liveTitle,
-      sheetIndex,
-      productItems: sortedProducts
-    });
-  });
-
-  return applySkuResetSheetInference(results);
+  return buildPackingItemsFromOrderedItems(
+    dataItems,
+    sellerSkuX,
+    productColumnRight,
+    getPageSheetIndex({ items: rawItems })
+  );
 }
 
 function findColumnX(headerRow, label) {
@@ -398,19 +334,15 @@ function matchTikTokPackingItems(fullText, maps) {
     const liveTitle = rowMatch[1].trim();
     const sellerSku = rowMatch[3];
     const sheetIndex = getLiveSheetIndex(liveTitle);
-    const lookup = lookupProductSmart(maps, sheetIndex, sellerSku);
-    if (!lookup.productName) continue;
+    const key = `${sheetIndex}:${sellerSku}`;
 
-    const key = `${lookup.sheetIndex}:${sellerSku}`;
     if (seen.has(key)) continue;
 
+    const productName = lookupProduct(maps, sheetIndex, sellerSku);
+    if (!productName) continue;
+
     seen.add(key);
-    matches.push({
-      saleNumber: sellerSku,
-      sheetIndex: lookup.sheetIndex,
-      liveTitle,
-      productName: lookup.productName
-    });
+    matches.push({ saleNumber: sellerSku, sheetIndex, liveTitle, productName });
   }
 
   if (matches.length === 0) {
@@ -436,19 +368,14 @@ function matchSellerSkuFallback(fullText, maps) {
   const numbers = sellerSkuSection.match(/\b(\d+)\b/g) || [];
 
   for (const saleNumber of numbers) {
-    const lookup = lookupProductSmart(maps, sheetIndex, saleNumber);
-    if (!lookup.productName) continue;
-
-    const key = `${lookup.sheetIndex}:${saleNumber}`;
+    const key = `${sheetIndex}:${saleNumber}`;
     if (seen.has(key)) continue;
 
+    const productName = lookupProduct(maps, sheetIndex, saleNumber);
+    if (!productName) continue;
+
     seen.add(key);
-    matches.push({
-      saleNumber,
-      sheetIndex: lookup.sheetIndex,
-      liveTitle,
-      productName: lookup.productName
-    });
+    matches.push({ saleNumber, sheetIndex, liveTitle, productName });
   }
 
   return matches;
