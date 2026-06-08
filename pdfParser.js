@@ -120,6 +120,41 @@ function getPageSheetIndex(textContent) {
   return getLiveSheetIndex(liveMatch[1], liveMatch[1].split(/\s+/));
 }
 
+function applySkuResetSheetInference(results) {
+  let activeSheet = 1;
+  let maxSkuSeen = 0;
+
+  return results.map(item => {
+    const skuNumber = parseInt(item.saleNumber, 10);
+    const liveText = String(item.liveTitle || "").replace(/\s+/g, " ").trim();
+    const explicitlyScreen2 = /SCREEN\s*2\b/i.test(liveText);
+    const explicitlyScreen1 = /FRIDAY\s+LIVE\s*-\s*AS\s+SEEN\s+ON\s+SCREEN\b/i.test(liveText) && !explicitlyScreen2;
+
+    if (explicitlyScreen2) {
+      activeSheet = 2;
+    } else if (
+      activeSheet === 1 &&
+      Number.isFinite(skuNumber) &&
+      maxSkuSeen >= 100 &&
+      skuNumber <= maxSkuSeen - 20
+    ) {
+      // TikTok resets Seller SKU numbers when the second live starts.
+      // Example: 1, 7, 45, 88, 90, 93, 176, then 59, 88.
+      // Once this reset is seen, the remaining duplicate SKUs should use Sheet 2.
+      activeSheet = 2;
+    }
+
+    if (Number.isFinite(skuNumber)) {
+      maxSkuSeen = Math.max(maxSkuSeen, skuNumber);
+    }
+
+    return {
+      ...item,
+      sheetIndex: explicitlyScreen1 && activeSheet === 1 ? 1 : activeSheet
+    };
+  });
+}
+
 function parseTikTokPackingItems(textContent) {
   const items = textContent.items.filter(item => item.str && item.str.trim());
   const layout = getTableColumnLayout(textContent);
@@ -176,25 +211,34 @@ function parseTikTokPackingItems(textContent) {
         : sortedSales[idx - 1].transform[5] - rowTolerance;
     const lowerBound = saleY - rowTolerance;
 
-    const productItems = dataItems.filter(item => {
+    const allProductItemsForRow = dataItems.filter(item => {
       const y = item.transform[5];
 
       return (
         item.transform[4] < productColumnRight &&
         y <= upperBound &&
         y >= lowerBound &&
-        !/^\d+$/.test(item.str.trim()) &&
-        !isGenericLiveTitle(item.str)
+        !/^\d+$/.test(item.str.trim())
       );
     });
 
-    const sortedProducts = productItems.sort(
+    const overlayProductItems = allProductItemsForRow.filter(
+      item => !isGenericLiveTitle(item.str)
+    );
+
+    const sortedAllProducts = allProductItemsForRow.sort(
       (a, b) =>
         b.transform[5] - a.transform[5] ||
         a.transform[4] - b.transform[4]
     );
 
-    const productLines = groupProductLines(sortedProducts);
+    const sortedProducts = overlayProductItems.sort(
+      (a, b) =>
+        b.transform[5] - a.transform[5] ||
+        a.transform[4] - b.transform[4]
+    );
+
+    const productLines = groupProductLines(sortedAllProducts);
     const liveTitle = productLines.join(" ");
 
     if (isTableEndText(liveTitle)) return;
@@ -214,7 +258,7 @@ function parseTikTokPackingItems(textContent) {
     });
   });
 
-  return results;
+  return applySkuResetSheetInference(results);
 }
 
 function parseTikTokPackingItemsFromRows(rawItems) {
@@ -259,25 +303,34 @@ function parseTikTokPackingItemsFromRows(rawItems) {
     const prevRowIdx =
       idx === 0 ? headerIdx : saleRowIndices[idx - 1];
 
-    const productItems = [];
+    const allProductItemsForRow = [];
 
     for (let j = rowIdx; j > prevRowIdx; j--) {
-      productItems.push(
+      allProductItemsForRow.push(
         ...rows[j].items.filter(
           item =>
             item.transform[4] < columnCutoff - 8 &&
-            !/^\d+$/.test(item.str.trim()) &&
-            !isGenericLiveTitle(item.str)
+            !/^\d+$/.test(item.str.trim())
         )
       );
     }
 
-    const sortedProducts = productItems.sort(
+    const overlayProductItems = allProductItemsForRow.filter(
+      item => !isGenericLiveTitle(item.str)
+    );
+
+    const sortedAllProducts = allProductItemsForRow.sort(
       (a, b) =>
         b.transform[5] - a.transform[5] ||
         a.transform[4] - b.transform[4]
     );
-    const productLines = groupProductLines(sortedProducts);
+
+    const sortedProducts = overlayProductItems.sort(
+      (a, b) =>
+        b.transform[5] - a.transform[5] ||
+        a.transform[4] - b.transform[4]
+    );
+    const productLines = groupProductLines(sortedAllProducts);
     const liveTitle = productLines.join(" ");
     let sheetIndex = getLiveSheetIndex(liveTitle, productLines);
 
@@ -294,7 +347,7 @@ function parseTikTokPackingItemsFromRows(rawItems) {
     });
   });
 
-  return results;
+  return applySkuResetSheetInference(results);
 }
 
 function findColumnX(headerRow, label) {
@@ -345,15 +398,19 @@ function matchTikTokPackingItems(fullText, maps) {
     const liveTitle = rowMatch[1].trim();
     const sellerSku = rowMatch[3];
     const sheetIndex = getLiveSheetIndex(liveTitle);
-    const key = `${sheetIndex}:${sellerSku}`;
+    const lookup = lookupProductSmart(maps, sheetIndex, sellerSku);
+    if (!lookup.productName) continue;
 
+    const key = `${lookup.sheetIndex}:${sellerSku}`;
     if (seen.has(key)) continue;
 
-    const productName = lookupProduct(maps, sheetIndex, sellerSku);
-    if (!productName) continue;
-
     seen.add(key);
-    matches.push({ saleNumber: sellerSku, sheetIndex, liveTitle, productName });
+    matches.push({
+      saleNumber: sellerSku,
+      sheetIndex: lookup.sheetIndex,
+      liveTitle,
+      productName: lookup.productName
+    });
   }
 
   if (matches.length === 0) {
@@ -379,14 +436,19 @@ function matchSellerSkuFallback(fullText, maps) {
   const numbers = sellerSkuSection.match(/\b(\d+)\b/g) || [];
 
   for (const saleNumber of numbers) {
-    const key = `${sheetIndex}:${saleNumber}`;
+    const lookup = lookupProductSmart(maps, sheetIndex, saleNumber);
+    if (!lookup.productName) continue;
+
+    const key = `${lookup.sheetIndex}:${saleNumber}`;
     if (seen.has(key)) continue;
 
-    const productName = lookupProduct(maps, sheetIndex, saleNumber);
-    if (!productName) continue;
-
     seen.add(key);
-    matches.push({ saleNumber, sheetIndex, liveTitle, productName });
+    matches.push({
+      saleNumber,
+      sheetIndex: lookup.sheetIndex,
+      liveTitle,
+      productName: lookup.productName
+    });
   }
 
   return matches;

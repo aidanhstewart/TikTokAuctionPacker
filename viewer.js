@@ -96,8 +96,8 @@ const MONO_THRESHOLD = 165;
         columnLayout
       );
 
-      const productName = lookupProduct(maps, sheetIndex, saleNumber);
-      drawLineItemOverlay(context, bounds, productName);
+      const lookup = lookupProductSmart(maps, sheetIndex, saleNumber);
+      drawLineItemOverlay(context, bounds, lookup.productName);
     }
 
     maskSkuColumnHeader(context, textContent, viewport, columnLayout);

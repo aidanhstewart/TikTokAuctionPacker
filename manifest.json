@@ -2,7 +2,7 @@
 {
   "manifest_version": 3,
   "name": "TikTok Shop Packing List Enhancer",
-  "version": "7.8",
+  "version": "8.0",
   "description": "Render TikTok Shop packing lists with product names from Seller SKU.",
   "permissions": [
     "storage",
