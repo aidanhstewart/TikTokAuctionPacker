@@ -1,0 +1,29 @@
+// manifest.json
+{
+  "manifest_version": 3,
+  "name": "TikTok Shop Packing List Enhancer",
+  "version": "7.2",
+  "description": "Render TikTok Shop packing lists with product names from Seller SKU.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "pdfjs/pdf.worker.min.js"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

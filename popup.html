@@ -1,0 +1,73 @@
+<!-- popup.html -->
+<!DOCTYPE html>
+<html>
+<head>
+
+  <title>TikTok Shop Enhancer</title>
+
+  <style>
+
+    body {
+      width: 340px;
+      padding: 15px;
+      font-family: Arial;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: bold;
+      margin-top: 12px;
+      margin-bottom: 6px;
+    }
+
+    input {
+      width: 100%;
+      padding: 10px;
+      box-sizing: border-box;
+    }
+
+    button {
+      width: 100%;
+      margin-top: 14px;
+      padding: 10px;
+      cursor: pointer;
+    }
+
+    .hint {
+      font-size: 11px;
+      color: #555;
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+
+  </style>
+
+</head>
+
+<body>
+
+  <h2>TikTok Shop Enhancer</h2>
+
+  <label for="sheetUrl1">Live 1 sheet</label>
+  <input
+    id="sheetUrl1"
+    placeholder="DAY LIVE - AS SEEN ON SCREEN"
+  />
+  <div class="hint">SKUs 1–300 from the first live.</div>
+
+  <label for="sheetUrl2">Live 2 sheet</label>
+  <input
+    id="sheetUrl2"
+    placeholder="DAY LIVE - AS SEEN ON SCREEN 2"
+  />
+  <div class="hint">SKUs 1–300 from the second live (after TikTok resets).</div>
+
+  <button id="saveBtn">
+    Save
+  </button>
+
+  <script src="popup.js"></script>
+
+</body>
+</html>
