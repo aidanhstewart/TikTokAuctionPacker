@@ -1,10 +1,13 @@
-// viewer.js
+// viewer.js — tuned for TSC thermal printers (203 DPI, 4×6 labels)
 
 const THERMAL = {
   widthIn: 4,
   heightIn: 6,
-  dpi: 600
+  dpi: 203
 };
+
+const RENDER_SCALE = 2;
+const MONO_THRESHOLD = 165;
 
 (async function () {
   const params = new URLSearchParams(window.location.search);
@@ -43,11 +46,13 @@ const THERMAL = {
   const container = document.getElementById("pdfContainer");
   const targetW = THERMAL.widthIn * THERMAL.dpi;
   const targetH = THERMAL.heightIn * THERMAL.dpi;
+  const renderW = targetW * RENDER_SCALE;
+  const renderH = targetH * RENDER_SCALE;
 
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum);
     const baseViewport = page.getViewport({ scale: 1 });
-    const scale = targetW / baseViewport.width;
+    const scale = renderW / baseViewport.width;
     const viewport = page.getViewport({ scale });
 
     const wrapper = document.createElement("div");
@@ -56,12 +61,11 @@ const THERMAL = {
     const canvas = document.createElement("canvas");
     const context = canvas.getContext("2d", { alpha: false });
 
-    canvas.width = targetW;
-    canvas.height = targetH;
-    canvas.className = "pageCanvas";
-
+    canvas.width = renderW;
+    canvas.height = renderH;
     context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, targetW, targetH);
+    context.fillRect(0, 0, renderW, renderH);
+    context.imageSmoothingEnabled = false;
 
     wrapper.appendChild(canvas);
     container.appendChild(wrapper);
@@ -92,71 +96,136 @@ const THERMAL = {
 
       drawProductOverlay(context, bounds, productName);
     }
+
+    attachPreviewCanvas(wrapper, canvas, targetW, targetH);
   }
 
   document.getElementById("printBtn").addEventListener("click", () => {
     flattenPagesForPrint();
-    setTimeout(() => window.print(), 50);
+    setTimeout(() => window.print(), 80);
   });
 
   window.addEventListener("afterprint", restorePagesAfterPrint);
 })();
 
+function attachPreviewCanvas(wrapper, hiResCanvas, targetW, targetH) {
+  hiResCanvas.className = "hiResCanvas";
+  hiResCanvas.style.display = "none";
+
+  const preview = document.createElement("canvas");
+  preview.width = targetW;
+  preview.height = targetH;
+  preview.className = "pageCanvas";
+
+  const ctx = preview.getContext("2d", { alpha: false });
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(hiResCanvas, 0, 0, targetW, targetH);
+
+  wrapper.appendChild(preview);
+}
+
 function drawProductOverlay(context, bounds, productName) {
+  const left = Math.round(bounds.left);
+  const top = Math.round(bounds.top);
+  const width = Math.round(bounds.width);
+  const height = Math.round(bounds.height);
+  const fontSize = Math.round(bounds.fontSize);
+
   context.fillStyle = "#ffffff";
-  context.fillRect(bounds.left, bounds.top, bounds.width, bounds.height);
+  context.fillRect(left, top, width, height);
 
   context.fillStyle = "#000000";
   context.textBaseline = "top";
-  context.font = `bold ${bounds.fontSize}px Helvetica, Arial, sans-serif`;
+  context.font = `bold ${fontSize}px Helvetica, Arial, sans-serif`;
 
   drawWrappedText(
     context,
     productName,
-    bounds.left,
-    bounds.top + 1,
-    bounds.width,
-    bounds.fontSize * bounds.lineHeight
+    left,
+    top + 1,
+    width,
+    fontSize * bounds.lineHeight
   );
 }
 
 function drawWrappedText(context, text, x, y, maxWidth, lineHeight) {
   const words = text.split(/\s+/);
   let line = "";
-  let currentY = y;
+  let currentY = Math.round(y);
 
   for (const word of words) {
     const testLine = line ? `${line} ${word}` : word;
 
     if (context.measureText(testLine).width > maxWidth && line) {
-      context.fillText(line, x, currentY);
+      context.fillText(line, Math.round(x), currentY);
       line = word;
-      currentY += lineHeight;
+      currentY += Math.round(lineHeight);
     } else {
       line = testLine;
     }
   }
 
   if (line) {
-    context.fillText(line, x, currentY);
+    context.fillText(line, Math.round(x), currentY);
   }
+}
+
+function createThermalPrintCanvas(sourceCanvas) {
+  const targetW = THERMAL.widthIn * THERMAL.dpi;
+  const targetH = THERMAL.heightIn * THERMAL.dpi;
+
+  const output = document.createElement("canvas");
+  output.width = targetW;
+  output.height = targetH;
+
+  const ctx = output.getContext("2d", { alpha: false });
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(sourceCanvas, 0, 0, targetW, targetH);
+  toThermalMonochrome(ctx, targetW, targetH);
+
+  return output;
+}
+
+function toThermalMonochrome(context, width, height) {
+  const imageData = context.getImageData(0, 0, width, height);
+  const data = imageData.data;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const luminance =
+      0.2126 * data[i] +
+      0.7152 * data[i + 1] +
+      0.0722 * data[i + 2];
+    const value = luminance < MONO_THRESHOLD ? 0 : 255;
+
+    data[i] = value;
+    data[i + 1] = value;
+    data[i + 2] = value;
+    data[i + 3] = 255;
+  }
+
+  context.putImageData(imageData, 0, 0);
 }
 
 function flattenPagesForPrint() {
   document.querySelectorAll(".pageWrapper").forEach(wrapper => {
     if (wrapper.dataset.flattened === "1") return;
 
-    const canvas = wrapper.querySelector("canvas");
-    if (!canvas) return;
+    const hiResCanvas =
+      wrapper.querySelector(".hiResCanvas") ||
+      wrapper.querySelector("canvas");
+    if (!hiResCanvas) return;
 
+    const printCanvas = createThermalPrintCanvas(hiResCanvas);
     const img = document.createElement("img");
     img.className = "printImage";
-    img.src = canvas.toDataURL("image/png");
+    img.width = printCanvas.width;
+    img.height = printCanvas.height;
+    img.src = printCanvas.toDataURL("image/png");
     img.alt = "Packing list";
-    img.style.width = THERMAL.widthIn + "in";
-    img.style.height = THERMAL.heightIn + "in";
 
-    canvas.classList.add("screenOnly");
+    wrapper.querySelectorAll("canvas").forEach(canvas => {
+      canvas.classList.add("screenOnly");
+    });
     wrapper.appendChild(img);
     wrapper.dataset.flattened = "1";
   });
@@ -165,7 +234,9 @@ function flattenPagesForPrint() {
 function restorePagesAfterPrint() {
   document.querySelectorAll(".pageWrapper").forEach(wrapper => {
     wrapper.querySelectorAll(".printImage").forEach(img => img.remove());
-    wrapper.querySelector("canvas")?.classList.remove("screenOnly");
+    wrapper.querySelectorAll("canvas").forEach(canvas => {
+      canvas.classList.remove("screenOnly");
+    });
     delete wrapper.dataset.flattened;
   });
 }
