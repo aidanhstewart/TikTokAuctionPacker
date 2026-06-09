@@ -79,7 +79,7 @@ const MONO_THRESHOLD = 165;
     const textContent = await page.getTextContent();
     const columnLayout = getTableColumnLayout(textContent);
 
-    maskGenericLiveTitles(context, textContent, viewport, columnLayout);
+    maskCoverableLiveTitles(context, textContent, viewport, columnLayout);
 
     const packingItems = parseTikTokPackingItems(textContent);
 
@@ -123,24 +123,38 @@ const MONO_THRESHOLD = 165;
   window.addEventListener("afterprint", restorePagesAfterPrint);
 })();
 
-function maskGenericLiveTitles(context, textContent, viewport, layout) {
-  if (
-    layout.skuColumnLeftPdf == null ||
-    layout.skuColumnRightPdf == null ||
-    layout.productColumnRightPdf == null
-  ) {
+function maskCoverableLiveTitles(context, textContent, viewport, layout) {
+  if (layout.productColumnRightPdf == null) {
     return;
   }
 
-  const skuLeft = pdfXToViewport(viewport, layout.skuColumnLeftPdf);
-  const skuRight = pdfXToViewport(viewport, layout.skuColumnRightPdf);
+  const productLeft = pdfXToViewport(
+    viewport,
+    layout.productColumnLeftPdf ?? 20
+  );
+  const productRight = pdfXToViewport(viewport, layout.productColumnRightPdf);
+  const skuLeft =
+    layout.skuColumnLeftPdf != null
+      ? pdfXToViewport(viewport, layout.skuColumnLeftPdf)
+      : productRight;
+  const skuRight =
+    layout.skuColumnRightPdf != null
+      ? pdfXToViewport(viewport, layout.skuColumnRightPdf)
+      : skuLeft;
 
   context.fillStyle = "#ffffff";
 
   for (const item of textContent.items) {
-    if (!item.str || !isGenericLiveTitle(item.str)) continue;
-    if (item.transform[4] < layout.productColumnRightPdf) continue;
-    if (item.transform[4] >= layout.skuColumnRightPdf + 20) continue;
+    if (!item.str || !isMaskableLiveTitle(item.str)) continue;
+
+    const itemX = item.transform[4];
+    const inProduct = itemX < layout.productColumnRightPdf;
+    const inSku =
+      layout.skuColumnLeftPdf != null &&
+      itemX >= layout.skuColumnLeftPdf &&
+      itemX < (layout.skuColumnRightPdf ?? Infinity) + 20;
+
+    if (!inProduct && !inSku) continue;
 
     const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
     const scaleY = Math.hypot(tx[2], tx[3]) || viewport.scale;
@@ -148,10 +162,13 @@ function maskGenericLiveTitles(context, textContent, viewport, layout) {
     const top = tx[5] - fontSize * 0.82 - 2;
     const height = fontSize * 1.05 + 4;
 
+    const left = inProduct ? productLeft : Math.max(skuLeft, productRight);
+    const right = inProduct ? productRight : skuRight;
+
     context.fillRect(
-      Math.round(skuLeft),
+      Math.round(left),
       Math.round(top),
-      Math.round(skuRight - skuLeft),
+      Math.round(Math.max(right - left, 0)),
       Math.round(height)
     );
   }
@@ -174,35 +191,82 @@ function attachPreviewCanvas(wrapper, hiResCanvas, targetW, targetH) {
 }
 
 function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
-  if (!bounds.skuColumn) return;
+  if (!bounds.overlayColumn) return;
 
-  const sku = bounds.skuColumn;
-  const skuLeft = Math.round(sku.left);
-  const skuTop = Math.round(sku.top);
-  const skuWidth = Math.round(sku.width);
-  const skuHeight = Math.round(sku.height);
+  const overlay = bounds.overlayColumn;
+  const overlayLeft = Math.round(overlay.left);
+  const overlayTop = Math.round(overlay.top);
+  const overlayWidth = Math.round(overlay.width);
+  const overlayHeight = Math.round(overlay.height);
+  const productRight = Math.round(overlay.productRight);
+
+  if (overlayWidth <= 0 || overlayHeight <= 0) return;
 
   context.fillStyle = "#ffffff";
-  context.fillRect(skuLeft, skuTop, skuWidth, skuHeight);
 
-  const fontSize = Math.round(bounds.product.fontSize);
+  const skuFillLeft = Math.max(productRight, overlayLeft);
+  const skuFillWidth = overlayLeft + overlayWidth - skuFillLeft;
+  if (skuFillWidth > 0) {
+    context.fillRect(skuFillLeft, overlayTop, skuFillWidth, overlayHeight);
+  }
+
+  const productFillBottom = overlay.screenExclude
+    ? Math.round(overlay.screenExclude.top)
+    : overlayTop + overlayHeight;
+  const productFillHeight = productFillBottom - overlayTop;
+  const productFillWidth = productRight - overlayLeft;
+
+  if (productFillHeight > 0 && productFillWidth > 0) {
+    context.fillRect(overlayLeft, overlayTop, productFillWidth, productFillHeight);
+  }
+
   const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
   const overlayText = productName
     ? `${sheetTag}${productName}`
     : `${sheetTag}(no match)`;
 
+  const padX = 2;
+  const padY = 1;
+  const maxWidth = Math.max(overlayWidth - padX * 2, 0);
+  const lineHeightFactor = bounds.product.lineHeight;
+  let fontSize = Math.round(bounds.product.fontSize * 1.12);
+
+  context.save();
+  context.beginPath();
+  context.rect(overlayLeft, overlayTop, overlayWidth, overlayHeight);
+  context.clip();
+
   context.fillStyle = "#000000";
   context.textBaseline = "top";
-  context.font = `bold ${fontSize}px Helvetica, Arial, sans-serif`;
 
-  drawWrappedText(
-    context,
-    overlayText,
-    skuLeft + 2,
-    skuTop + 1,
-    Math.max(skuWidth - 4, 0),
-    fontSize * bounds.product.lineHeight
-  );
+  let lines = [];
+  while (fontSize >= 8) {
+    context.font = `bold ${fontSize}px Helvetica, Arial, sans-serif`;
+    lines = wrapTextLines(context, overlayText, maxWidth);
+    const totalHeight = lines.length * fontSize * lineHeightFactor;
+
+    if (totalHeight <= overlayHeight - padY * 2 || fontSize <= 8) {
+      break;
+    }
+
+    fontSize -= 1;
+  }
+
+  const lineHeight = fontSize * lineHeightFactor;
+  const totalTextHeight = lines.length * lineHeight;
+  const textY =
+    overlayTop +
+    Math.max(padY, (overlayHeight - totalTextHeight) / 2 - 7);
+
+  for (let i = 0; i < lines.length; i++) {
+    context.fillText(
+      lines[i],
+      Math.round(overlayLeft + padX),
+      Math.round(textY + i * lineHeight)
+    );
+  }
+
+  context.restore();
 }
 
 function maskSkuColumnHeader(context, textContent, viewport, layout) {
@@ -235,26 +299,29 @@ function maskSkuColumnHeader(context, textContent, viewport, layout) {
   }
 }
 
-function drawWrappedText(context, text, x, y, maxWidth, lineHeight) {
+function wrapTextLines(context, text, maxWidth) {
+  if (maxWidth <= 0) return [text];
+
   const words = text.split(/\s+/);
+  const lines = [];
   let line = "";
-  let currentY = Math.round(y);
 
   for (const word of words) {
     const testLine = line ? `${line} ${word}` : word;
 
     if (context.measureText(testLine).width > maxWidth && line) {
-      context.fillText(line, Math.round(x), currentY);
+      lines.push(line);
       line = word;
-      currentY += Math.round(lineHeight);
     } else {
       line = testLine;
     }
   }
 
   if (line) {
-    context.fillText(line, Math.round(x), currentY);
+    lines.push(line);
   }
+
+  return lines.length ? lines : [text];
 }
 
 function createThermalPrintCanvas(sourceCanvas) {
@@ -391,22 +458,43 @@ function getLineItemBounds(productItems, saleItem, viewport, layout) {
     lineHeight: 1.05
   };
 
-  let skuColumn = null;
+  let overlayColumn = null;
 
-  if (
-    layout.skuColumnLeftPdf != null &&
-    layout.skuColumnRightPdf != null
-  ) {
-    const skuLeft = pdfXToViewport(viewport, layout.skuColumnLeftPdf);
+  if (layout.skuColumnRightPdf != null) {
+    const productRightViewport =
+      layout.productColumnRightPdf != null
+        ? pdfXToViewport(viewport, layout.productColumnRightPdf)
+        : productRight;
     const skuRight = pdfXToViewport(viewport, layout.skuColumnRightPdf);
 
-    skuColumn = {
-      left: skuLeft,
+    let screenExclude = null;
+
+    for (const item of productItems) {
+      if (!isScreenIndicator(item.str)) continue;
+
+      const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+      const scaleY = Math.hypot(tx[2], tx[3]) || viewport.scale;
+      const itemFontSize = scaleY || (item.height || 10) * viewport.scale;
+      const screenTop = tx[5] - itemFontSize * 0.82 - 2;
+      const screenBottom = tx[5] + itemFontSize * 0.15 + 2;
+
+      if (!screenExclude) {
+        screenExclude = { top: screenTop, bottom: screenBottom };
+      } else {
+        screenExclude.top = Math.min(screenExclude.top, screenTop);
+        screenExclude.bottom = Math.max(screenExclude.bottom, screenBottom);
+      }
+    }
+
+    overlayColumn = {
+      left: productLeft,
       top: rowTop,
-      width: Math.max(skuRight - skuLeft, 0),
-      height: rowHeight
+      width: Math.max(skuRight - productLeft, 0),
+      height: rowHeight,
+      productRight: productRightViewport,
+      screenExclude
     };
   }
 
-  return { product, skuColumn };
+  return { product, overlayColumn };
 }

@@ -78,7 +78,7 @@ function getTableColumnLayout(textContent) {
   return {
     productColumnLeftPdf: productLabel?.transform[4] ?? 20,
     productColumnRightPdf: firstDataColumn - 4,
-    skuColumnLeftPdf: skuX != null ? skuX - 22 : null,
+    skuColumnLeftPdf: skuX != null ? skuX - 2 : null,
     skuColumnRightPdf:
       sellerSkuX != null
         ? sellerSkuX - 4
@@ -96,6 +96,19 @@ function isGenericLiveTitle(text) {
   if (/^ON\s+SCREEN\s*2?$/i.test(value)) return true;
 
   return false;
+}
+
+function isMaskableLiveTitle(text) {
+  const value = text.replace(/\s+/g, " ").trim();
+
+  if (isScreenIndicator(value)) return false;
+
+  return /LIVE\s*-\s*AS SEEN/i.test(value);
+}
+
+function isScreenIndicator(text) {
+  const value = text.replace(/\s+/g, " ").trim();
+  return /^SCREEN\s*2?$/i.test(value) || /^ON\s+SCREEN\s*2?$/i.test(value);
 }
 
 function isTableEndText(text) {
