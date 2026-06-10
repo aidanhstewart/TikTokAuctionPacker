@@ -92,8 +92,8 @@ function isGenericLiveTitle(text) {
   const value = text.replace(/\s+/g, " ").trim();
 
   if (/LIVE\s*-\s*AS SEEN/i.test(value)) return true;
-  if (/^SCREEN\s*2?$/i.test(value)) return true;
-  if (/^ON\s+SCREEN\s*2?$/i.test(value)) return true;
+  if (/^SCREEN\s*[23]?$/i.test(value)) return true;
+  if (/^ON\s+SCREEN\s*[23]?$/i.test(value)) return true;
 
   return false;
 }
@@ -108,7 +108,9 @@ function isMaskableLiveTitle(text) {
 
 function isScreenIndicator(text) {
   const value = text.replace(/\s+/g, " ").trim();
-  return /^SCREEN\s*2?$/i.test(value) || /^ON\s+SCREEN\s*2?$/i.test(value);
+  return (
+    /^SCREEN\s*[23]?$/i.test(value) || /^ON\s+SCREEN\s*[23]?$/i.test(value)
+  );
 }
 
 function isTableEndText(text) {
@@ -123,7 +125,7 @@ function isTableEndText(text) {
 function getPageSheetIndex(textContent) {
   const pageText = textContent.items.map(item => item.str).join(" ");
   const liveMatch = pageText.match(
-    /([A-Z]+\s+LIVE\s*-\s*AS SEEN ON(?:\s+SCREEN)?(?:\s+2)?)/i
+    /([A-Z]+\s+LIVE\s*-\s*AS SEEN ON(?:\s+SCREEN)?(?:\s+[23])?)/i
   );
 
   if (!liveMatch) {
@@ -373,7 +375,7 @@ function matchSellerSkuFallback(fullText, maps) {
   if (!sellerSkuSection) return matches;
 
   const liveMatch = fullText.match(
-    /([A-Z]+\s+LIVE\s*-\s*AS SEEN ON SCREEN(?:\s+2)?)/i
+    /([A-Z]+\s+LIVE\s*-\s*AS SEEN ON SCREEN(?:\s+[23])?)/i
   );
   const liveTitle = liveMatch ? liveMatch[1] : "";
   const sheetIndex = getLiveSheetIndex(liveTitle);

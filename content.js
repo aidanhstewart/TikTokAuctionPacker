@@ -10,11 +10,13 @@
   const stored = await chrome.storage.local.get([
     "sheetUrl1",
     "sheetUrl2",
+    "sheetUrl3",
     "sheetUrl"
   ]);
 
   const sheetUrl1 = stored.sheetUrl1 || stored.sheetUrl;
   const sheetUrl2 = stored.sheetUrl2;
+  const sheetUrl3 = stored.sheetUrl3 || "";
 
   if (!sheetUrl1 || !sheetUrl2) {
     alert("Save both Live 1 and Live 2 Google Sheet URLs in the extension popup.");
@@ -22,7 +24,7 @@
   }
 
   try {
-    const maps = await loadSheetMaps(sheetUrl1, sheetUrl2);
+    const maps = await loadSheetMaps(sheetUrl1, sheetUrl2, sheetUrl3);
 
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       chrome.runtime.getURL("pdfjs/pdf.worker.min.js");

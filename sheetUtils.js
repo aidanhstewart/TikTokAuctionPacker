@@ -10,6 +10,16 @@ function getLiveSheetIndex(liveTitle, productLines) {
     .replace(/\s+/g, " ")
     .trim();
 
+  if (/LIVE\s*-\s*AS SEEN ON SCREEN\s+3\b/i.test(allText)) return 3;
+  if (/^SCREEN\s*3$/i.test(lines[lines.length - 1] || "")) return 3;
+  if (/^ON\s+SCREEN\s*3$/i.test(lines[lines.length - 1] || "")) return 3;
+  if (
+    /\bSCREEN\s*3\b/i.test(allText) &&
+    /\b(LIVE|AS\s+SEEN\s+ON)\b/i.test(allText)
+  ) {
+    return 3;
+  }
+
   if (/LIVE\s*-\s*AS SEEN ON SCREEN\s+2\b/i.test(allText)) return 2;
   if (/^SCREEN\s*2$/i.test(lines[lines.length - 1] || "")) return 2;
   if (/^ON\s+SCREEN\s*2$/i.test(lines[lines.length - 1] || "")) return 2;
@@ -53,13 +63,24 @@ async function fetchSheetData(url) {
   return map;
 }
 
-async function loadSheetMaps(sheetUrl1, sheetUrl2) {
-  const [map1, map2] = await Promise.all([
+async function loadSheetMaps(sheetUrl1, sheetUrl2, sheetUrl3) {
+  const fetches = [
     fetchSheetData(sheetUrl1),
     fetchSheetData(sheetUrl2)
-  ]);
+  ];
 
-  return { 1: map1, 2: map2 };
+  if (sheetUrl3) {
+    fetches.push(fetchSheetData(sheetUrl3));
+  }
+
+  const [map1, map2, map3] = await Promise.all(fetches);
+
+  const maps = { 1: map1, 2: map2 };
+  if (sheetUrl3) {
+    maps[3] = map3;
+  }
+
+  return maps;
 }
 
 function lookupProduct(maps, sheetIndex, saleNumber) {
