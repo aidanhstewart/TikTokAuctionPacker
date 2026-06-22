@@ -82,6 +82,7 @@ const MONO_THRESHOLD = 165;
     maskCoverableLiveTitles(context, textContent, viewport, columnLayout);
 
     const packingItems = parseTikTokPackingItems(textContent);
+    const overlayItems = [];
 
     for (const {
       saleNumber,
@@ -107,12 +108,22 @@ const MONO_THRESHOLD = 165;
         lookedUpProduct: productName
       });
 
-      drawLineItemOverlay(context, bounds, productName, sheetIndex);
+      overlayItems.push({ bounds, productName, sheetIndex });
     }
 
     maskSkuColumnHeader(context, textContent, viewport, columnLayout);
 
-    attachPreviewCanvas(wrapper, canvas, targetW, targetH);
+    const preview = attachPreviewCanvas(wrapper, canvas, targetW, targetH);
+    const previewCtx = preview.getContext("2d", { alpha: false });
+
+    for (const { bounds, productName, sheetIndex } of overlayItems) {
+      drawLineItemOverlay(
+        previewCtx,
+        scaleOverlayBounds(bounds, RENDER_SCALE),
+        productName,
+        sheetIndex
+      );
+    }
   }
 
   document.getElementById("printBtn").addEventListener("click", () => {
@@ -188,6 +199,44 @@ function attachPreviewCanvas(wrapper, hiResCanvas, targetW, targetH) {
   ctx.drawImage(hiResCanvas, 0, 0, targetW, targetH);
 
   wrapper.appendChild(preview);
+  return preview;
+}
+
+function scaleOverlayBounds(bounds, renderScale) {
+  const factor = 1 / renderScale;
+
+  const scaleBox = box => {
+    if (!box) return null;
+
+    const scaled = {
+      left: Math.round(box.left * factor),
+      top: Math.round(box.top * factor),
+      width: Math.round(box.width * factor),
+      height: Math.round(box.height * factor)
+    };
+
+    if (box.productRight != null) {
+      scaled.productRight = Math.round(box.productRight * factor);
+    }
+
+    if (box.screenExclude) {
+      scaled.screenExclude = {
+        top: Math.round(box.screenExclude.top * factor),
+        bottom: Math.round(box.screenExclude.bottom * factor)
+      };
+    }
+
+    return scaled;
+  };
+
+  return {
+    product: {
+      ...scaleBox(bounds.product),
+      fontSize: bounds.product.fontSize * factor,
+      lineHeight: bounds.product.lineHeight
+    },
+    overlayColumn: scaleBox(bounds.overlayColumn)
+  };
 }
 
 function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
@@ -229,7 +278,7 @@ function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
   const padY = 1;
   const maxWidth = Math.max(overlayWidth - padX * 2, 0);
   const lineHeightFactor = bounds.product.lineHeight;
-  let fontSize = Math.round(bounds.product.fontSize * 1.12);
+  let fontSize = Math.max(8, Math.round(bounds.product.fontSize * 1.12));
 
   context.save();
   context.beginPath();
@@ -243,7 +292,8 @@ function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
   while (fontSize >= 8) {
     context.font = `bold ${fontSize}px Helvetica, Arial, sans-serif`;
     lines = wrapTextLines(context, overlayText, maxWidth);
-    const totalHeight = lines.length * fontSize * lineHeightFactor;
+    const lineHeight = Math.round(fontSize * lineHeightFactor);
+    const totalHeight = lines.length * lineHeight;
 
     if (totalHeight <= overlayHeight - padY * 2 || fontSize <= 8) {
       break;
@@ -252,17 +302,17 @@ function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
     fontSize -= 1;
   }
 
-  const lineHeight = fontSize * lineHeightFactor;
+  const lineHeight = Math.round(fontSize * lineHeightFactor);
   const totalTextHeight = lines.length * lineHeight;
   const textY =
     overlayTop +
-    Math.max(padY, (overlayHeight - totalTextHeight) / 2 - 7);
+    Math.max(padY, Math.round((overlayHeight - totalTextHeight) / 2) - 4);
 
   for (let i = 0; i < lines.length; i++) {
     context.fillText(
       lines[i],
-      Math.round(overlayLeft + padX),
-      Math.round(textY + i * lineHeight)
+      overlayLeft + padX,
+      textY + i * lineHeight
     );
   }
 
@@ -364,12 +414,13 @@ function flattenPagesForPrint() {
   document.querySelectorAll(".pageWrapper").forEach(wrapper => {
     if (wrapper.dataset.flattened === "1") return;
 
-    const hiResCanvas =
+    const sourceCanvas =
+      wrapper.querySelector(".pageCanvas") ||
       wrapper.querySelector(".hiResCanvas") ||
       wrapper.querySelector("canvas");
-    if (!hiResCanvas) return;
+    if (!sourceCanvas) return;
 
-    const printCanvas = createThermalPrintCanvas(hiResCanvas);
+    const printCanvas = createThermalPrintCanvas(sourceCanvas);
     const img = document.createElement("img");
     img.className = "printImage";
     img.width = printCanvas.width;
