@@ -124,11 +124,25 @@ const MONO_THRESHOLD = 165;
         sheetIndex
       );
     }
+
+    // Hi-res canvas is only needed to build the 1× preview; drop it to save GPU RAM.
+    canvas.width = 0;
+    canvas.height = 0;
+    canvas.remove();
   }
 
-  document.getElementById("printBtn").addEventListener("click", () => {
-    flattenPagesForPrint();
-    setTimeout(() => window.print(), 80);
+  const printBtn = document.getElementById("printBtn");
+  printBtn.addEventListener("click", async () => {
+    printBtn.disabled = true;
+    printBtn.textContent = "Preparing…";
+
+    try {
+      await flattenPagesForPrint();
+      setTimeout(() => window.print(), 80);
+    } finally {
+      printBtn.disabled = false;
+      printBtn.textContent = "Print";
+    }
   });
 
   window.addEventListener("afterprint", restorePagesAfterPrint);
@@ -374,24 +388,16 @@ function wrapTextLines(context, text, maxWidth) {
   return lines.length ? lines : [text];
 }
 
-function createThermalPrintCanvas(sourceCanvas) {
-  const targetW = THERMAL.widthIn * THERMAL.dpi;
-  const targetH = THERMAL.heightIn * THERMAL.dpi;
-
-  const output = document.createElement("canvas");
-  output.width = targetW;
-  output.height = targetH;
-
-  const ctx = output.getContext("2d", { alpha: false });
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(sourceCanvas, 0, 0, targetW, targetH);
-  toThermalMonochrome(ctx, targetW, targetH);
-
-  return output;
-}
-
 function toThermalMonochrome(context, width, height) {
-  const imageData = context.getImageData(0, 0, width, height);
+  let imageData;
+
+  try {
+    imageData = context.getImageData(0, 0, width, height);
+  } catch (err) {
+    console.error("[TikTokPacker] Monochrome conversion failed:", err);
+    return false;
+  }
+
   const data = imageData.data;
 
   for (let i = 0; i < data.length; i += 4) {
@@ -408,38 +414,61 @@ function toThermalMonochrome(context, width, height) {
   }
 
   context.putImageData(imageData, 0, 0);
+  return true;
 }
 
-function flattenPagesForPrint() {
-  document.querySelectorAll(".pageWrapper").forEach(wrapper => {
-    if (wrapper.dataset.flattened === "1") return;
+function createPrintCanvas(sourceCanvas) {
+  const printCanvas = document.createElement("canvas");
+  printCanvas.width = sourceCanvas.width;
+  printCanvas.height = sourceCanvas.height;
+  printCanvas.className = "printCanvas";
 
-    const sourceCanvas =
-      wrapper.querySelector(".pageCanvas") ||
-      wrapper.querySelector(".hiResCanvas") ||
-      wrapper.querySelector("canvas");
-    if (!sourceCanvas) return;
+  const ctx = printCanvas.getContext("2d", { alpha: false });
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(sourceCanvas, 0, 0);
 
-    const printCanvas = createThermalPrintCanvas(sourceCanvas);
-    const img = document.createElement("img");
-    img.className = "printImage";
-    img.width = printCanvas.width;
-    img.height = printCanvas.height;
-    img.src = printCanvas.toDataURL("image/png");
-    img.alt = "Packing list";
+  if (!toThermalMonochrome(ctx, printCanvas.width, printCanvas.height)) {
+    printCanvas.width = 0;
+    printCanvas.height = 0;
+    return null;
+  }
 
-    wrapper.querySelectorAll("canvas").forEach(canvas => {
-      canvas.classList.add("screenOnly");
-    });
-    wrapper.appendChild(img);
+  return printCanvas;
+}
+
+function yieldToBrowser() {
+  return new Promise(resolve => requestAnimationFrame(resolve));
+}
+
+async function flattenPagesForPrint() {
+  const wrappers = [...document.querySelectorAll(".pageWrapper")];
+
+  for (const wrapper of wrappers) {
+    if (wrapper.dataset.flattened === "1") continue;
+
+    const pageCanvas = wrapper.querySelector(".pageCanvas");
+    if (!pageCanvas) continue;
+
+    const printCanvas = createPrintCanvas(pageCanvas);
+    if (!printCanvas) continue;
+
+    pageCanvas.classList.add("screenOnly");
+    wrapper.appendChild(printCanvas);
     wrapper.dataset.flattened = "1";
-  });
+
+    // Spread work across frames so large batches don't freeze the tab.
+    await yieldToBrowser();
+  }
 }
 
 function restorePagesAfterPrint() {
   document.querySelectorAll(".pageWrapper").forEach(wrapper => {
-    wrapper.querySelectorAll(".printImage").forEach(img => img.remove());
-    wrapper.querySelectorAll("canvas").forEach(canvas => {
+    wrapper.querySelectorAll(".printCanvas").forEach(canvas => {
+      canvas.width = 0;
+      canvas.height = 0;
+      canvas.remove();
+    });
+    wrapper.querySelectorAll(".pageCanvas").forEach(canvas => {
       canvas.classList.remove("screenOnly");
     });
     delete wrapper.dataset.flattened;
