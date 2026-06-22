@@ -98,6 +98,10 @@ function isGenericLiveTitle(text) {
   return false;
 }
 
+function needsSheetOverlay(titleText) {
+  return isGenericLiveTitle(titleText);
+}
+
 function isMaskableLiveTitle(text) {
   const value = text.replace(/\s+/g, " ").trim();
 

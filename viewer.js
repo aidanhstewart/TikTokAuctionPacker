@@ -91,6 +91,15 @@ const MONO_THRESHOLD = 165;
       productItems,
       liveTitle
     } of packingItems) {
+      if (!needsSheetOverlay(liveTitle)) {
+        console.log("[TikTokPacker] marketplace row — left as-is", {
+          page: pageNum,
+          saleNumber,
+          productTitle: liveTitle
+        });
+        continue;
+      }
+
       const bounds = getLineItemBounds(
         productItems,
         saleItem,
