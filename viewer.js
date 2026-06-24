@@ -84,6 +84,7 @@ const MONO_THRESHOLD = 165;
     maskCoverableLiveTitles(context, textContent, viewport, columnLayout);
 
     const packingItems = parseTikTokPackingItems(textContent);
+    const searchOverlays = [];
 
     for (const {
       saleNumber,
@@ -110,19 +111,33 @@ const MONO_THRESHOLD = 165;
       });
 
       drawLineItemOverlay(context, bounds, productName, sheetIndex);
+
+      const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
+      searchOverlays.push({
+        text: productName ? `${sheetTag}${productName}` : `${sheetTag}?`,
+        bounds
+      });
     }
 
     maskSkuColumnHeader(context, textContent, viewport, columnLayout);
 
-    attachPreviewCanvas(wrapper, canvas, targetW, targetH);
+    const pageContent = attachPreviewCanvas(wrapper, canvas, targetW, targetH);
+    attachSearchTextLayer(
+      pageContent,
+      textContent,
+      viewport,
+      searchOverlays,
+      targetW,
+      targetH
+    );
+    page.cleanup();
   }
 
+  pdf.destroy();
+
   document.getElementById("printBtn").addEventListener("click", () => {
-    flattenPagesForPrint();
     setTimeout(() => window.print(), 80);
   });
-
-  window.addEventListener("afterprint", restorePagesAfterPrint);
 })();
 
 function maskCoverableLiveTitles(context, textContent, viewport, layout) {
@@ -176,20 +191,103 @@ function maskCoverableLiveTitles(context, textContent, viewport, layout) {
   }
 }
 
-function attachPreviewCanvas(wrapper, hiResCanvas, targetW, targetH) {
-  hiResCanvas.className = "hiResCanvas";
-  hiResCanvas.style.display = "none";
+function releaseCanvas(canvas) {
+  if (!canvas) return;
+  canvas.width = 0;
+  canvas.height = 0;
+  canvas.remove();
+}
 
-  const preview = document.createElement("canvas");
+function attachPreviewCanvas(wrapper, hiResCanvas, targetW, targetH) {
+  const preview = buildPageBitmap(hiResCanvas);
+  preview.className = "pageCanvas";
   preview.width = targetW;
   preview.height = targetH;
-  preview.className = "pageCanvas";
 
-  const ctx = preview.getContext("2d", { alpha: false });
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(hiResCanvas, 0, 0, targetW, targetH);
+  const pageContent = document.createElement("div");
+  pageContent.className = "pageContent";
+  pageContent.appendChild(preview);
 
-  wrapper.appendChild(preview);
+  wrapper.appendChild(pageContent);
+  releaseCanvas(hiResCanvas);
+
+  return pageContent;
+}
+
+function appendSearchSpan(layer, text, left, top, fontSize) {
+  const span = document.createElement("span");
+  span.textContent = text;
+  span.style.left = `${left}px`;
+  span.style.top = `${top}px`;
+  span.style.fontSize = `${Math.max(fontSize, 1)}px`;
+  layer.appendChild(span);
+}
+
+function attachSearchTextLayer(
+  pageContent,
+  textContent,
+  renderViewport,
+  searchOverlays,
+  targetW,
+  targetH
+) {
+  const coordScale = targetW / renderViewport.width;
+  const textLayer = document.createElement("div");
+  textLayer.className = "textLayer";
+  textLayer.setAttribute("aria-hidden", "true");
+  textLayer.style.width = `${targetW}px`;
+  textLayer.style.height = `${targetH}px`;
+
+  for (const item of textContent.items) {
+    if (!item.str || !item.str.trim()) continue;
+
+    const tx = pdfjsLib.Util.transform(renderViewport.transform, item.transform);
+    const fontHeight =
+      Math.hypot(tx[2], tx[3]) ||
+      (item.height || 12) * renderViewport.scale;
+
+    appendSearchSpan(
+      textLayer,
+      item.str,
+      tx[4] * coordScale,
+      (tx[5] - fontHeight) * coordScale,
+      fontHeight * coordScale
+    );
+  }
+
+  for (const { text, bounds } of searchOverlays) {
+    if (!text || !bounds?.overlayColumn) continue;
+
+    const col = bounds.overlayColumn;
+    appendSearchSpan(
+      textLayer,
+      text,
+      col.left * coordScale,
+      col.top * coordScale,
+      bounds.product.fontSize * coordScale * 1.12
+    );
+  }
+
+  pageContent.appendChild(textLayer);
+  syncTextLayerScale(pageContent);
+
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver(() => syncTextLayerScale(pageContent));
+    observer.observe(pageContent);
+  }
+}
+
+function syncTextLayerScale(pageContent) {
+  const preview = pageContent.querySelector(".pageCanvas");
+  const textLayer = pageContent.querySelector(".textLayer");
+  if (!preview || !textLayer) return;
+
+  const displayW = preview.getBoundingClientRect().width;
+  if (!displayW || !preview.width) return;
+
+  const scale = displayW / preview.width;
+  textLayer.style.transform = `scale(${scale})`;
+  textLayer.style.transformOrigin = "top left";
 }
 
 function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
@@ -326,19 +424,69 @@ function wrapTextLines(context, text, maxWidth) {
   return lines.length ? lines : [text];
 }
 
-function createThermalPrintCanvas(sourceCanvas) {
+function buildPageBitmap(sourceCanvas) {
   const targetW = THERMAL.widthIn * THERMAL.dpi;
   const targetH = THERMAL.heightIn * THERMAL.dpi;
+
+  if (sourceCanvas.width === targetW && sourceCanvas.height === targetH) {
+    const ctx = sourceCanvas.getContext("2d", { alpha: false });
+    toThermalMonochrome(ctx, targetW, targetH);
+    return sourceCanvas;
+  }
+
+  return downscaleAndBinarize(sourceCanvas, targetW, targetH);
+}
+
+function downscaleAndBinarize(sourceCanvas, targetW, targetH) {
+  const sw = sourceCanvas.width;
+  const sh = sourceCanvas.height;
+  const scaleX = sw / targetW;
+  const scaleY = sh / targetH;
+  const srcData = sourceCanvas
+    .getContext("2d", { willReadFrequently: true })
+    .getImageData(0, 0, sw, sh).data;
 
   const output = document.createElement("canvas");
   output.width = targetW;
   output.height = targetH;
 
-  const ctx = output.getContext("2d", { alpha: false });
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(sourceCanvas, 0, 0, targetW, targetH);
-  toThermalMonochrome(ctx, targetW, targetH);
+  const outCtx = output.getContext("2d", { alpha: false });
+  const outData = outCtx.createImageData(targetW, targetH);
 
+  for (let y = 0; y < targetH; y++) {
+    const y0 = Math.floor(y * scaleY);
+    const y1 = Math.min(Math.floor((y + 1) * scaleY), sh);
+
+    for (let x = 0; x < targetW; x++) {
+      const x0 = Math.floor(x * scaleX);
+      const x1 = Math.min(Math.floor((x + 1) * scaleX), sw);
+      let black = false;
+
+      for (let sy = y0; sy < y1 && !black; sy++) {
+        for (let sx = x0; sx < x1; sx++) {
+          const idx = (sy * sw + sx) * 4;
+          const luminance =
+            0.2126 * srcData[idx] +
+            0.7152 * srcData[idx + 1] +
+            0.0722 * srcData[idx + 2];
+
+          if (luminance < MONO_THRESHOLD) {
+            black = true;
+            break;
+          }
+        }
+      }
+
+      const value = black ? 0 : 255;
+      const i = (y * targetW + x) * 4;
+      outData.data[i] = value;
+      outData.data[i + 1] = value;
+      outData.data[i + 2] = value;
+      outData.data[i + 3] = 255;
+    }
+  }
+
+  outCtx.putImageData(outData, 0, 0);
   return output;
 }
 
@@ -360,41 +508,6 @@ function toThermalMonochrome(context, width, height) {
   }
 
   context.putImageData(imageData, 0, 0);
-}
-
-function flattenPagesForPrint() {
-  document.querySelectorAll(".pageWrapper").forEach(wrapper => {
-    if (wrapper.dataset.flattened === "1") return;
-
-    const hiResCanvas =
-      wrapper.querySelector(".hiResCanvas") ||
-      wrapper.querySelector("canvas");
-    if (!hiResCanvas) return;
-
-    const printCanvas = createThermalPrintCanvas(hiResCanvas);
-    const img = document.createElement("img");
-    img.className = "printImage";
-    img.width = printCanvas.width;
-    img.height = printCanvas.height;
-    img.src = printCanvas.toDataURL("image/png");
-    img.alt = "Packing list";
-
-    wrapper.querySelectorAll("canvas").forEach(canvas => {
-      canvas.classList.add("screenOnly");
-    });
-    wrapper.appendChild(img);
-    wrapper.dataset.flattened = "1";
-  });
-}
-
-function restorePagesAfterPrint() {
-  document.querySelectorAll(".pageWrapper").forEach(wrapper => {
-    wrapper.querySelectorAll(".printImage").forEach(img => img.remove());
-    wrapper.querySelectorAll("canvas").forEach(canvas => {
-      canvas.classList.remove("screenOnly");
-    });
-    delete wrapper.dataset.flattened;
-  });
 }
 
 function pdfXToViewport(viewport, pdfX) {

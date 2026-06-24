@@ -38,17 +38,36 @@ body {
   height: 6in;
 }
 
-.pageCanvas {
-  display: block;
+.pageContent {
+  position: relative;
   width: 4in;
   height: 6in;
-  background: white;
 }
 
-.printImage {
-  display: none;
-  width: 4in;
-  height: 6in;
+.pageCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: white;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
+}
+
+.textLayer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 2;
+  line-height: 1;
+}
+
+.textLayer span {
+  position: absolute;
+  white-space: pre;
+  color: rgba(0, 0, 0, 0.01);
 }
 
 @media print {
@@ -86,11 +105,16 @@ body {
     overflow: hidden;
   }
 
-  .screenOnly {
+  .pageContent {
+    width: 4in !important;
+    height: 6in !important;
+  }
+
+  .textLayer {
     display: none !important;
   }
 
-  .printImage {
+  .pageCanvas {
     display: block !important;
     width: 4in !important;
     height: 6in !important;
@@ -99,6 +123,9 @@ body {
     margin: 0;
     padding: 0;
     border: 0;
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
+    image-rendering: pixelated;
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
