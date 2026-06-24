@@ -1,7 +1,5 @@
-// manifest.json
-{
-  "manifest_version": 3,
-  "name": "6 Sheet TikTok Packer",
+{  "manifest_version": 3,
+  "name": "TikTok Packer",
   "version": "1.0",
   "description": "Render TikTok Shop packing lists with product names from Seller SKU.",
   "permissions": [

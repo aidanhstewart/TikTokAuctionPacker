@@ -15,7 +15,8 @@ const WORKBOOK_STORAGE_KEYS = [
   "workbookMaps",
   "workbookFileName",
   "workbookUpdatedAt",
-  "workbookWarnings"
+  "workbookWarnings",
+  "workbookItemChecks"
 ];
 
 function getSheetStorageKeys() {
@@ -96,6 +97,62 @@ function countMapRows(maps) {
   return counts;
 }
 
+function hasCellValue(value) {
+  return normalizeProductName(value) !== "";
+}
+
+function findColumnCheckRows(rows, columnIndex = 2) {
+  const hits = [];
+
+  rows.forEach((row, i) => {
+    if (i === 0) return;
+
+    if (!row || !row.length) return;
+
+    if (hasCellValue(row[columnIndex])) {
+      hits.push(i + 1);
+    }
+  });
+
+  return hits;
+}
+
+function formatRowList(rows) {
+  if (rows.length === 1) {
+    return `row ${rows[0]}`;
+  }
+
+  return `rows ${rows.join(", ")}`;
+}
+
+function formatItemCheckEntry(entry) {
+  const liveLabel =
+    entry.liveIndex != null ? ` (Live ${entry.liveIndex})` : "";
+  return `Sheet "${entry.sheet}"${liveLabel}: ${formatRowList(entry.rows)}`;
+}
+
+function formatItemCheckBlockMessage(itemChecks) {
+  const lines = [
+    "Item checks are required before continuing.",
+    "",
+    "Clear column C on these rows, then reload your workbook:",
+    ""
+  ];
+
+  itemChecks.forEach(entry => {
+    lines.push(`- ${formatItemCheckEntry(entry)}`);
+  });
+
+  lines.push("");
+  lines.push("Column C is used for pending item checks.");
+
+  return lines.join("\n");
+}
+
+function hasPendingItemChecks(stored) {
+  return Boolean(stored?.workbookItemChecks?.length);
+}
+
 // ---------------------------------------------------------------------------
 // Workbook tab mapping
 // ---------------------------------------------------------------------------
@@ -112,6 +169,10 @@ function liveIndexFromTabName(name, positionIndex) {
   return positionIndex;
 }
 
+function isIgnoredWorkbookTab(tabName) {
+  return /COST/i.test(String(tabName || ""));
+}
+
 function mergeTabIntoMaps(maps, liveIndex, tabMap, warnings, tabName) {
   if (maps[liveIndex]) {
     warnings.push(
@@ -126,8 +187,17 @@ function buildWorkbookParseResult(tabReports) {
   const warnings = [];
   const loadedTabs = [];
   const skippedTabs = [];
+  const itemChecks = [];
 
   tabReports.forEach(report => {
+    if (report.itemCheckRows?.length) {
+      itemChecks.push({
+        sheet: report.tabName,
+        liveIndex: report.liveIndex,
+        rows: report.itemCheckRows
+      });
+    }
+
     if (report.status === "loaded") {
       loadedTabs.push(report);
       mergeTabIntoMaps(maps, report.liveIndex, report.map, warnings, report.tabName);
@@ -148,6 +218,7 @@ function buildWorkbookParseResult(tabReports) {
     warnings,
     loadedTabs,
     skippedTabs,
+    itemChecks,
     liveCount: Object.keys(maps).length
   };
 }
@@ -185,6 +256,14 @@ function formatWorkbookStatusSummary({
 }
 
 function getSetupStatus(stored) {
+  if (hasWorkbookMaps(stored) && hasPendingItemChecks(stored)) {
+    return {
+      mode: "workbook-blocked",
+      ready: false,
+      label: "Item checks required in column C"
+    };
+  }
+
   if (hasWorkbookMaps(stored)) {
     return {
       mode: "workbook",
@@ -320,21 +399,23 @@ function parseCsvLine(line) {
   return cols;
 }
 
-function csvTextToSaleMap(csv) {
-  const rows = csv.split(/\r?\n/);
-  const dataRows = rows.map(row => parseCsvLine(row));
-  return rowsToSaleMap(dataRows).map;
+function csvTextToRows(csv) {
+  return csv.split(/\r?\n/).map(row => parseCsvLine(row));
 }
 
-async function fetchSheetData(url) {
-  if (!url) return {};
+function csvTextToSaleMap(csv) {
+  return rowsToSaleMap(csvTextToRows(csv)).map;
+}
+
+async function fetchSheetCsv(url) {
+  if (!url) return null;
 
   const csvUrl = normalizeSheetUrl(url);
   const response = await fetch(csvUrl);
 
   if (!response.ok) {
     console.warn("[TikTokPacker] Sheet fetch failed:", csvUrl, response.status);
-    return {};
+    return null;
   }
 
   const csv = await response.text();
@@ -344,9 +425,40 @@ async function fetchSheetData(url) {
       "[TikTokPacker] Sheet URL returned HTML, not CSV. Use a published CSV link or shareable sheet URL:",
       csvUrl
     );
-    return {};
+    return null;
   }
 
+  return csv;
+}
+
+async function scanLegacyUrlsForItemChecks(urls) {
+  const checks = [];
+
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    if (!url) continue;
+
+    const csv = await fetchSheetCsv(url);
+    if (!csv) continue;
+
+    const rows = csvTextToRows(csv);
+    const itemCheckRows = findColumnCheckRows(rows, 2);
+
+    if (itemCheckRows.length > 0) {
+      checks.push({
+        sheet: `Live ${i + 1} sheet`,
+        liveIndex: i + 1,
+        rows: itemCheckRows
+      });
+    }
+  }
+
+  return checks;
+}
+
+async function fetchSheetData(url) {
+  const csv = await fetchSheetCsv(url);
+  if (!csv) return {};
   return csvTextToSaleMap(csv);
 }
 
@@ -403,6 +515,31 @@ async function loadSheetMapsFromUrls(sheetUrls) {
 function lookupProduct(maps, sheetIndex, saleNumber) {
   const key = normalizeSaleNumber(saleNumber);
   return (maps[sheetIndex] || {})[key] || null;
+}
+
+async function getPendingItemChecks(stored) {
+  const data =
+    stored || (await chrome.storage.local.get(getSheetStorageKeys()));
+
+  if (hasWorkbookMaps(data)) {
+    return data.workbookItemChecks || [];
+  }
+
+  const urls = getStoredSheetUrls(data);
+  if (!urls[0] || !urls[1]) {
+    return [];
+  }
+
+  return scanLegacyUrlsForItemChecks(urls);
+}
+
+async function assertNoPendingItemChecks(stored) {
+  const itemChecks = await getPendingItemChecks(stored);
+  if (itemChecks.length > 0) {
+    const err = new Error("ITEM_CHECKS_REQUIRED");
+    err.itemChecks = itemChecks;
+    throw err;
+  }
 }
 
 async function resolveSheetMaps(stored) {

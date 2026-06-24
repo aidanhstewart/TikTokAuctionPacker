@@ -8,6 +8,17 @@
   if (!isPdf) return;
 
   const stored = await chrome.storage.local.get(getSheetStorageKeys());
+
+  try {
+    await assertNoPendingItemChecks(stored);
+  } catch (err) {
+    if (err?.message === "ITEM_CHECKS_REQUIRED") {
+      alert(formatItemCheckBlockMessage(err.itemChecks || []));
+      return;
+    }
+    throw err;
+  }
+
   const maps = await resolveSheetMaps(stored);
 
   if (!maps) {

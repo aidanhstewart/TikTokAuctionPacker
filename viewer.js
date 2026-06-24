@@ -39,6 +39,7 @@ function getPdfUrlFromQuery() {
 
 async function loadProductMaps() {
   const stored = await chrome.storage.local.get(getSheetStorageKeys());
+  await assertNoPendingItemChecks(stored);
   const maps = await resolveSheetMaps(stored);
   if (!maps) {
     throw new Error("NO_PRODUCT_DATA");
@@ -64,6 +65,10 @@ function formatViewerError(err) {
 
   if (err?.message === "NO_PRODUCT_DATA") {
     return getMissingSetupMessage();
+  }
+
+  if (err?.message === "ITEM_CHECKS_REQUIRED") {
+    return formatItemCheckBlockMessage(err.itemChecks || []);
   }
 
   if (err?.message === "LOCAL_FILE_BLOCKED") {
@@ -221,13 +226,14 @@ async function renderPage({
 
 function createRenderCanvas(width, height) {
   const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
   const context = canvas.getContext("2d", {
     alpha: false,
     willReadFrequently: true
   });
 
-  canvas.width = width;
-  canvas.height = height;
   context.fillStyle = "#ffffff";
   context.fillRect(0, 0, width, height);
   context.imageSmoothingEnabled = false;
@@ -242,6 +248,10 @@ function buildLineItemOverlay(item, maps, viewport, columnLayout, pageNum) {
     productItems,
     liveTitle
   } = item;
+
+  if (!saleItem || !saleNumber) {
+    return null;
+  }
 
   const bounds = getLineItemBounds(
     productItems,
@@ -264,7 +274,7 @@ function buildLineItemOverlay(item, maps, viewport, columnLayout, pageNum) {
     bounds,
     productName,
     sheetIndex,
-    searchText: productName ? `${sheetTag}${productName}` : `${sheetTag}?`
+    searchText: productName ? `${sheetTag}${productName}` : `${sheetTag}no match`
   };
 }
 
@@ -356,7 +366,7 @@ function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
   const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
   const overlayText = productName
     ? `${sheetTag}${productName}`
-    : `${sheetTag}?`;
+    : `${sheetTag}no match`;
 
   const padX = 2;
   const padY = 1;

@@ -105,6 +105,12 @@
       border-color: #e8d39b;
     }
 
+    .status.blocked {
+      background: #fff4f4;
+      border-color: #e4b4b4;
+      color: #7a1e1e;
+    }
+
     details {
       margin-top: 16px;
       border-top: 1px solid #ddd;
@@ -140,7 +146,9 @@
   <div class="hint">
     Google Sheets: File &gt; Download &gt; Microsoft Excel (.xlsx).<br>
     Each tab = one live (tab 1 = Live 1, tab 2 = Live 2, etc.).<br>
-    Column A = sale #, column B = product name. Row 1 is the header.
+    Column A = sale #, column B = product name. Row 1 is the header.<br>
+    Column C must be empty before packing (used for item checks).<br>
+    Tabs with "COST" in the name are ignored. Row 1 is the header.
   </div>
 
   <div id="workbookStatus" class="status empty">No workbook loaded.</div>

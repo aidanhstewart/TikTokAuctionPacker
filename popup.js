@@ -28,6 +28,11 @@ function renderSetupMode(stored) {
   const box = els.setupMode();
   box.classList.toggle("ready", setup.ready);
 
+  if (setup.mode === "workbook-blocked") {
+    box.textContent = "Blocked: item checks required in column C before packing";
+    return;
+  }
+
   if (setup.mode === "workbook") {
     box.textContent = `Ready: workbook mode (${setup.label})`;
     return;
@@ -48,19 +53,27 @@ function renderWorkbookStatus(stored) {
     return;
   }
 
-  const message = formatWorkbookStatusSummary({
-    fileName: stored.workbookFileName || "Saved workbook",
-    maps: stored.workbookMaps,
-    warnings: stored.workbookWarnings || [],
-    updatedAt: stored.workbookUpdatedAt || null
-  });
+  const lines = [
+    formatWorkbookStatusSummary({
+      fileName: stored.workbookFileName || "Saved workbook",
+      maps: stored.workbookMaps,
+      warnings: stored.workbookWarnings || [],
+      updatedAt: stored.workbookUpdatedAt || null
+    })
+  ];
 
-  const variant =
-    stored.workbookWarnings && stored.workbookWarnings.length > 0
+  if (hasPendingItemChecks(stored)) {
+    lines.push("");
+    lines.push(formatItemCheckBlockMessage(stored.workbookItemChecks));
+  }
+
+  const variant = hasPendingItemChecks(stored)
+    ? "blocked"
+    : stored.workbookWarnings && stored.workbookWarnings.length > 0
       ? "warn"
       : "";
 
-  setWorkbookStatus(message, variant);
+  setWorkbookStatus(lines.join("\n"), variant);
   els.reloadWorkbookBtn().disabled = false;
 }
 
@@ -88,12 +101,17 @@ async function saveWorkbook(file) {
     workbookMaps: result.maps,
     workbookFileName: file.name,
     workbookUpdatedAt: Date.now(),
-    workbookWarnings: result.warnings
+    workbookWarnings: result.warnings,
+    workbookItemChecks: result.itemChecks
   });
 
   const stored = await chrome.storage.local.get(getSheetStorageKeys());
   renderWorkbookStatus(stored);
   renderSetupMode(stored);
+
+  if (result.itemChecks.length > 0) {
+    alert(formatItemCheckBlockMessage(result.itemChecks));
+  }
 }
 
 async function loadPopupState() {
