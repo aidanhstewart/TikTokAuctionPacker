@@ -1,4 +1,4 @@
-// viewer.js — tuned for TSC thermal printers (203 DPI, 4×6 labels)
+// viewer.js - TSC thermal printers (203 DPI, 4x6 labels)
 
 const THERMAL = {
   widthIn: 4,
@@ -9,42 +9,153 @@ const THERMAL = {
 const RENDER_SCALE = 2;
 const MONO_THRESHOLD = 165;
 
-(async function () {
-  const params = new URLSearchParams(window.location.search);
-  const pdfUrl = params.get("pdf");
+// ---------------------------------------------------------------------------
+// Startup
+// ---------------------------------------------------------------------------
 
+(async function initViewer() {
+  try {
+    const pdfUrl = getPdfUrlFromQuery();
+    const maps = await loadProductMaps();
+    configurePdfWorker();
+    const pdf = await loadPdfDocument(pdfUrl);
+
+    await renderAllPages(pdf, maps);
+    pdf.destroy();
+    wirePrintButton();
+  } catch (err) {
+    if (err?.message !== "ITEM_CHECKS_REQUIRED") {
+      console.error("[TikTokPacker]", err);
+    }
+    showViewerError(formatViewerError(err));
+  }
+})();
+
+function getPdfUrlFromQuery() {
+  const pdfUrl = new URLSearchParams(window.location.search).get("pdf");
   if (!pdfUrl) {
-    alert("No PDF URL supplied.");
-    return;
+    throw new Error("NO_PDF_URL");
+  }
+  return pdfUrl;
+}
+
+async function loadProductMaps() {
+  const stored = await chrome.storage.local.get(getSheetStorageKeys());
+  const data = await loadSheetDataFromStorage(stored);
+
+  if (data?.itemChecks?.length) {
+    const err = new Error("ITEM_CHECKS_REQUIRED");
+    err.itemChecks = data.itemChecks;
+    throw err;
   }
 
-  const stored = await chrome.storage.local.get([
-    "sheetUrl1",
-    "sheetUrl2",
-    "sheetUrl3",
-    "sheetUrl"
-  ]);
-
-  const sheetUrl1 = stored.sheetUrl1 || stored.sheetUrl;
-  const sheetUrl2 = stored.sheetUrl2;
-  const sheetUrl3 = stored.sheetUrl3 || "";
-
-  if (!sheetUrl1) {
-    alert("No Live 1 Google Sheet URL saved.");
-    return;
+  if (!data?.maps || Object.keys(data.maps).length === 0) {
+    throw new Error("NO_PRODUCT_DATA");
   }
 
-  if (!sheetUrl2) {
-    alert("No Live 2 Google Sheet URL saved.");
-    return;
-  }
+  return data.maps;
+}
 
-  const maps = await loadSheetMaps(sheetUrl1, sheetUrl2, sheetUrl3);
-
+function configurePdfWorker() {
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     chrome.runtime.getURL("pdfjs/pdf.worker.min.js");
+}
 
-  const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
+function wirePrintButton() {
+  document.getElementById("printBtn").addEventListener("click", () => {
+    setTimeout(() => window.print(), 80);
+  });
+}
+
+function formatViewerError(err) {
+  if (err?.message === "NO_PDF_URL") {
+    return "No PDF URL was provided to the viewer.";
+  }
+
+  if (err?.message === "NO_PRODUCT_DATA") {
+    return getMissingSetupMessage();
+  }
+
+  if (err?.message === "ITEM_CHECKS_REQUIRED") {
+    return formatItemCheckBlockMessage(err.itemChecks || []);
+  }
+
+  if (
+    err?.message === "SPREADSHEET_NOT_ACCESSIBLE" ||
+    err?.message?.startsWith("SPREADSHEET_FETCH_FAILED:")
+  ) {
+    return formatSpreadsheetFetchError(err);
+  }
+
+  if (err?.message === "LOCAL_FILE_BLOCKED") {
+    return [
+      "Could not read the local PDF file.",
+      "",
+      "In chrome://extensions, open this extension and enable:",
+      "Allow access to file URLs",
+      "",
+      "Then reopen the PDF."
+    ].join("\n");
+  }
+
+  if (err?.message?.startsWith("Failed to read local PDF")) {
+    return [
+      err.message,
+      "",
+      "Check that the file still exists and that file URL access is enabled for this extension."
+    ].join("\n");
+  }
+
+  return [
+    "Failed to process this packing-list PDF.",
+    "",
+    String(err?.message || err),
+    "",
+    "Try reopening the PDF. If it keeps failing, check the browser console for details."
+  ].join("\n");
+}
+
+function showViewerError(message) {
+  const banner = document.getElementById("errorBanner");
+  const printBtn = document.getElementById("printBtn");
+  if (banner) {
+    banner.textContent = message;
+    banner.hidden = false;
+  } else {
+    alert(message);
+  }
+  if (printBtn) printBtn.disabled = true;
+}
+
+// ---------------------------------------------------------------------------
+// PDF loading
+// ---------------------------------------------------------------------------
+
+async function loadPdfDocument(url) {
+  if (url.startsWith("file://")) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to read local PDF (${response.status})`);
+      }
+      const data = await response.arrayBuffer();
+      return pdfjsLib.getDocument({ data }).promise;
+    } catch (err) {
+      if (String(err).includes("Failed to fetch")) {
+        throw new Error("LOCAL_FILE_BLOCKED");
+      }
+      throw err;
+    }
+  }
+
+  return pdfjsLib.getDocument(url).promise;
+}
+
+// ---------------------------------------------------------------------------
+// Page rendering
+// ---------------------------------------------------------------------------
+
+async function renderAllPages(pdf, maps) {
   const container = document.getElementById("pdfContainer");
   const targetW = THERMAL.widthIn * THERMAL.dpi;
   const targetH = THERMAL.heightIn * THERMAL.dpi;
@@ -52,92 +163,145 @@ const MONO_THRESHOLD = 165;
   const renderH = targetH * RENDER_SCALE;
 
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-    const page = await pdf.getPage(pageNum);
-    const baseViewport = page.getViewport({ scale: 1 });
-    const scale = renderW / baseViewport.width;
-    const viewport = page.getViewport({ scale });
+    await renderPage({
+      pdf,
+      pageNum,
+      maps,
+      container,
+      targetW,
+      targetH,
+      renderW,
+      renderH
+    });
+  }
+}
 
-    const wrapper = document.createElement("div");
-    wrapper.className = "pageWrapper";
+async function renderPage({
+  pdf,
+  pageNum,
+  maps,
+  container,
+  targetW,
+  targetH,
+  renderW,
+  renderH
+}) {
+  const page = await pdf.getPage(pageNum);
+  const baseViewport = page.getViewport({ scale: 1 });
+  const scale = renderW / baseViewport.width;
+  const viewport = page.getViewport({ scale });
 
-    const canvas = document.createElement("canvas");
-    const context = canvas.getContext("2d", { alpha: false });
+  const wrapper = document.createElement("div");
+  wrapper.className = "pageWrapper";
+  container.appendChild(wrapper);
 
-    canvas.width = renderW;
-    canvas.height = renderH;
-    context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, renderW, renderH);
-    context.imageSmoothingEnabled = false;
+  const canvas = createRenderCanvas(renderW, renderH);
+  const context = canvas.getContext("2d", {
+    alpha: false,
+    willReadFrequently: true
+  });
 
-    container.appendChild(wrapper);
+  await page.render({
+    canvasContext: context,
+    viewport,
+    intent: "print"
+  }).promise;
 
-    await page.render({
-      canvasContext: context,
-      viewport,
-      intent: "print"
-    }).promise;
+  const textContent = await page.getTextContent();
+  const columnLayout = getTableColumnLayout(textContent);
+  const searchOverlays = [];
 
-    const textContent = await page.getTextContent();
-    const columnLayout = getTableColumnLayout(textContent);
+  maskCoverableLiveTitles(context, textContent, viewport, columnLayout);
 
-    maskCoverableLiveTitles(context, textContent, viewport, columnLayout);
-
-    const packingItems = parseTikTokPackingItems(textContent);
-    const searchOverlays = [];
-
-    for (const {
-      saleNumber,
-      sheetIndex,
-      saleItem,
-      productItems,
-      liveTitle
-    } of packingItems) {
-      const bounds = getLineItemBounds(
-        productItems,
-        saleItem,
-        viewport,
-        columnLayout
-      );
-
-      const productName = lookupProduct(maps, sheetIndex, saleNumber);
-
-      console.log("[TikTokPacker]", {
-        page: pageNum,
-        saleNumber,
-        sheetIndex,
-        detectedTitle: liveTitle,
-        lookedUpProduct: productName
-      });
-
-      drawLineItemOverlay(context, bounds, productName, sheetIndex);
-
-      const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
+  const packingItems = parseTikTokPackingItems(textContent);
+  for (const item of packingItems) {
+    const overlay = buildLineItemOverlay(item, maps, viewport, columnLayout, pageNum);
+    if (overlay) {
+      drawLineItemOverlay(context, overlay.bounds, overlay.productName, overlay.sheetIndex);
       searchOverlays.push({
-        text: productName ? `${sheetTag}${productName}` : `${sheetTag}?`,
-        bounds
+        text: overlay.searchText,
+        bounds: overlay.bounds
       });
     }
-
-    maskSkuColumnHeader(context, textContent, viewport, columnLayout);
-
-    const pageContent = attachPreviewCanvas(wrapper, canvas, targetW, targetH);
-    attachSearchTextLayer(
-      pageContent,
-      textContent,
-      viewport,
-      searchOverlays,
-      targetW,
-      targetH
-    );
-    page.cleanup();
   }
 
-  pdf.destroy();
+  maskSkuColumnHeader(context, textContent, viewport, columnLayout);
 
-  document.getElementById("printBtn").addEventListener("click", () => {
-    setTimeout(() => window.print(), 80);
+  const pageContent = attachPreviewCanvas(wrapper, canvas, targetW, targetH);
+  attachSearchTextLayer(
+    pageContent,
+    textContent,
+    viewport,
+    searchOverlays,
+    targetW,
+    targetH
+  );
+
+  page.cleanup();
+}
+
+function createRenderCanvas(width, height) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext("2d", {
+    alpha: false,
+    willReadFrequently: true
   });
-})();
+
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+  context.imageSmoothingEnabled = false;
+  return canvas;
+}
+
+function buildLineItemOverlay(item, maps, viewport, columnLayout, pageNum) {
+  const {
+    saleNumber,
+    sheetIndex,
+    saleItem,
+    productItems,
+    liveTitle
+  } = item;
+
+  if (!saleItem || !saleNumber) {
+    return null;
+  }
+
+  const bounds = getLineItemBounds(
+    productItems,
+    saleItem,
+    viewport,
+    columnLayout
+  );
+  const resolvedSheetIndex = resolveSheetIndexForSale(
+    maps,
+    saleNumber,
+    sheetIndex
+  );
+  const productName = lookupProduct(maps, resolvedSheetIndex, saleNumber);
+
+  console.log("[TikTokPacker]", {
+    page: pageNum,
+    saleNumber,
+    sheetIndex: resolvedSheetIndex,
+    detectedTitle: liveTitle,
+    lookedUpProduct: productName
+  });
+
+  const sheetTag = resolvedSheetIndex ? `S${resolvedSheetIndex}: ` : "";
+  return {
+    bounds,
+    productName,
+    sheetIndex: resolvedSheetIndex,
+    searchText: productName ? `${sheetTag}${productName}` : `${sheetTag}no match`
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Masking + overlays
+// ---------------------------------------------------------------------------
 
 function maskCoverableLiveTitles(context, textContent, viewport, layout) {
   if (layout.productColumnRightPdf == null) {
@@ -189,6 +353,119 @@ function maskCoverableLiveTitles(context, textContent, viewport, layout) {
     );
   }
 }
+
+function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
+  if (!bounds.overlayColumn) return;
+
+  const overlay = bounds.overlayColumn;
+  const overlayLeft = Math.round(overlay.left);
+  const overlayTop = Math.round(overlay.top);
+  const overlayWidth = Math.round(overlay.width);
+  const overlayHeight = Math.round(overlay.height);
+  const productRight = Math.round(overlay.productRight);
+
+  if (overlayWidth <= 0 || overlayHeight <= 0) return;
+
+  context.fillStyle = "#ffffff";
+
+  const skuFillLeft = Math.max(productRight, overlayLeft);
+  const skuFillWidth = overlayLeft + overlayWidth - skuFillLeft;
+  if (skuFillWidth > 0) {
+    context.fillRect(skuFillLeft, overlayTop, skuFillWidth, overlayHeight);
+  }
+
+  const productFillBottom = overlay.screenExclude
+    ? Math.round(overlay.screenExclude.top)
+    : overlayTop + overlayHeight;
+  const productFillHeight = productFillBottom - overlayTop;
+  const productFillWidth = productRight - overlayLeft;
+
+  if (productFillHeight > 0 && productFillWidth > 0) {
+    context.fillRect(overlayLeft, overlayTop, productFillWidth, productFillHeight);
+  }
+
+  const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
+  const overlayText = productName
+    ? `${sheetTag}${productName}`
+    : `${sheetTag}no match`;
+
+  const padX = 2;
+  const padY = 1;
+  const maxWidth = Math.max(overlayWidth - padX * 2, 0);
+  const lineHeightFactor = bounds.product.lineHeight;
+  let fontSize = Math.round(bounds.product.fontSize * 1.12);
+
+  context.save();
+  context.beginPath();
+  context.rect(overlayLeft, overlayTop, overlayWidth, overlayHeight);
+  context.clip();
+
+  context.fillStyle = "#000000";
+  context.textBaseline = "top";
+
+  let lines = [];
+  while (fontSize >= 8) {
+    context.font = `bold ${fontSize}px Helvetica, Arial, sans-serif`;
+    lines = wrapTextLines(context, overlayText, maxWidth);
+    const totalHeight = lines.length * fontSize * lineHeightFactor;
+
+    if (totalHeight <= overlayHeight - padY * 2 || fontSize <= 8) {
+      break;
+    }
+
+    fontSize -= 1;
+  }
+
+  const lineHeight = fontSize * lineHeightFactor;
+  const totalTextHeight = lines.length * lineHeight;
+  const textY =
+    overlayTop +
+    Math.max(padY, (overlayHeight - totalTextHeight) / 2 - 7);
+
+  for (let i = 0; i < lines.length; i++) {
+    context.fillText(
+      lines[i],
+      Math.round(overlayLeft + padX),
+      Math.round(textY + i * lineHeight)
+    );
+  }
+
+  context.restore();
+}
+
+function maskSkuColumnHeader(context, textContent, viewport, layout) {
+  if (layout.skuColumnLeftPdf == null || layout.skuColumnRightPdf == null) {
+    return;
+  }
+
+  const skuLeft = pdfXToViewport(viewport, layout.skuColumnLeftPdf);
+  const skuRight = pdfXToViewport(viewport, layout.skuColumnRightPdf);
+
+  context.fillStyle = "#ffffff";
+
+  for (const item of textContent.items) {
+    const text = item.str.trim();
+    if (text !== "SKU") continue;
+    if (item.transform[4] >= layout.skuColumnRightPdf + 30) continue;
+
+    const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+    const scaleY = Math.hypot(tx[2], tx[3]) || viewport.scale;
+    const fontSize = scaleY || (item.height || 10) * viewport.scale;
+    const top = tx[5] - fontSize * 0.82 - 2;
+    const height = fontSize * 1.2 + 4;
+
+    context.fillRect(
+      Math.round(skuLeft),
+      Math.round(top),
+      Math.round(skuRight - skuLeft),
+      Math.round(height)
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Preview + search text layer
+// ---------------------------------------------------------------------------
 
 function releaseCanvas(canvas) {
   if (!canvas) return;
@@ -287,115 +564,6 @@ function syncTextLayerScale(pageContent) {
   textLayer.style.transformOrigin = "top left";
 }
 
-function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
-  if (!bounds.overlayColumn) return;
-
-  const overlay = bounds.overlayColumn;
-  const overlayLeft = Math.round(overlay.left);
-  const overlayTop = Math.round(overlay.top);
-  const overlayWidth = Math.round(overlay.width);
-  const overlayHeight = Math.round(overlay.height);
-  const productRight = Math.round(overlay.productRight);
-
-  if (overlayWidth <= 0 || overlayHeight <= 0) return;
-
-  context.fillStyle = "#ffffff";
-
-  const skuFillLeft = Math.max(productRight, overlayLeft);
-  const skuFillWidth = overlayLeft + overlayWidth - skuFillLeft;
-  if (skuFillWidth > 0) {
-    context.fillRect(skuFillLeft, overlayTop, skuFillWidth, overlayHeight);
-  }
-
-  const productFillBottom = overlay.screenExclude
-    ? Math.round(overlay.screenExclude.top)
-    : overlayTop + overlayHeight;
-  const productFillHeight = productFillBottom - overlayTop;
-  const productFillWidth = productRight - overlayLeft;
-
-  if (productFillHeight > 0 && productFillWidth > 0) {
-    context.fillRect(overlayLeft, overlayTop, productFillWidth, productFillHeight);
-  }
-
-  const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
-  const overlayText = productName
-    ? `${sheetTag}${productName}`
-    : `${sheetTag}?`;
-
-  const padX = 2;
-  const padY = 1;
-  const maxWidth = Math.max(overlayWidth - padX * 2, 0);
-  const lineHeightFactor = bounds.product.lineHeight;
-  let fontSize = Math.round(bounds.product.fontSize * 1.12);
-
-  context.save();
-  context.beginPath();
-  context.rect(overlayLeft, overlayTop, overlayWidth, overlayHeight);
-  context.clip();
-
-  context.fillStyle = "#000000";
-  context.textBaseline = "top";
-
-  let lines = [];
-  while (fontSize >= 8) {
-    context.font = `bold ${fontSize}px Helvetica, Arial, sans-serif`;
-    lines = wrapTextLines(context, overlayText, maxWidth);
-    const totalHeight = lines.length * fontSize * lineHeightFactor;
-
-    if (totalHeight <= overlayHeight - padY * 2 || fontSize <= 8) {
-      break;
-    }
-
-    fontSize -= 1;
-  }
-
-  const lineHeight = fontSize * lineHeightFactor;
-  const totalTextHeight = lines.length * lineHeight;
-  const textY =
-    overlayTop +
-    Math.max(padY, (overlayHeight - totalTextHeight) / 2 - 7);
-
-  for (let i = 0; i < lines.length; i++) {
-    context.fillText(
-      lines[i],
-      Math.round(overlayLeft + padX),
-      Math.round(textY + i * lineHeight)
-    );
-  }
-
-  context.restore();
-}
-
-function maskSkuColumnHeader(context, textContent, viewport, layout) {
-  if (layout.skuColumnLeftPdf == null || layout.skuColumnRightPdf == null) {
-    return;
-  }
-
-  const skuLeft = pdfXToViewport(viewport, layout.skuColumnLeftPdf);
-  const skuRight = pdfXToViewport(viewport, layout.skuColumnRightPdf);
-
-  context.fillStyle = "#ffffff";
-
-  for (const item of textContent.items) {
-    const text = item.str.trim();
-    if (text !== "SKU") continue;
-    if (item.transform[4] >= layout.skuColumnRightPdf + 30) continue;
-
-    const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-    const scaleY = Math.hypot(tx[2], tx[3]) || viewport.scale;
-    const fontSize = scaleY || (item.height || 10) * viewport.scale;
-    const top = tx[5] - fontSize * 0.82 - 2;
-    const height = fontSize * 1.2 + 4;
-
-    context.fillRect(
-      Math.round(skuLeft),
-      Math.round(top),
-      Math.round(skuRight - skuLeft),
-      Math.round(height)
-    );
-  }
-}
-
 function wrapTextLines(context, text, maxWidth) {
   if (maxWidth <= 0) return [text];
 
@@ -421,10 +589,17 @@ function wrapTextLines(context, text, maxWidth) {
   return lines.length ? lines : [text];
 }
 
+// ---------------------------------------------------------------------------
+// Thermal bitmap conversion
+// ---------------------------------------------------------------------------
+
 function buildPageBitmap(sourceCanvas) {
   const targetW = THERMAL.widthIn * THERMAL.dpi;
   const targetH = THERMAL.heightIn * THERMAL.dpi;
-  const ctx = sourceCanvas.getContext("2d", { alpha: false });
+  const ctx = sourceCanvas.getContext("2d", {
+    alpha: false,
+    willReadFrequently: true
+  });
 
   toThermalMonochrome(ctx, sourceCanvas.width, sourceCanvas.height);
 

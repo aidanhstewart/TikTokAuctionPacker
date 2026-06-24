@@ -1,6 +1,36 @@
-// pdfParser.js — TikTok Shop packing list parsing
+// pdfParser.js - TikTok Shop packing list parsing
 
-function groupTextItemsByRow(items, tolerance = 6) {
+const ROW_Y_TOLERANCE = 6;
+const SELLER_SKU_X_TOLERANCE = 40;
+
+function isNumericSellerSkuAtColumn(item, sellerSkuX) {
+  if (sellerSkuX == null) return false;
+  const text = item.str.trim();
+  return (
+    /^\d+$/.test(text) &&
+    Math.abs(item.transform[4] - sellerSkuX) <= SELLER_SKU_X_TOLERANCE
+  );
+}
+
+function getSellerSkuFromRow(rowItems, sellerSkuX) {
+  return (
+    rowItems.find(item => isNumericSellerSkuAtColumn(item, sellerSkuX)) || null
+  );
+}
+
+function hasSellerSkuValues(dataItems, sellerSkuX) {
+  return dataItems.some(item => isNumericSellerSkuAtColumn(item, sellerSkuX));
+}
+
+// ---------------------------------------------------------------------------
+// Row / text helpers
+// ---------------------------------------------------------------------------
+
+function normalizePdfText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function groupTextItemsByRow(items, tolerance = ROW_Y_TOLERANCE) {
   const rows = [];
 
   for (const item of items) {
@@ -37,7 +67,7 @@ function groupProductLines(sortedProducts) {
   for (const item of sortedProducts) {
     const y = item.transform[5];
 
-    if (currentY == null || Math.abs(y - currentY) > 6) {
+    if (currentY == null || Math.abs(y - currentY) > ROW_Y_TOLERANCE) {
       lines.push(item.str.trim());
       currentY = y;
     } else {
@@ -47,6 +77,19 @@ function groupProductLines(sortedProducts) {
 
   return lines;
 }
+
+function findColumnX(headerRow, label) {
+  for (const item of headerRow.items) {
+    if (item.str.includes(label)) {
+      return item.transform[4];
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Table layout
+// ---------------------------------------------------------------------------
 
 function getTableColumnLayout(textContent) {
   const items = textContent.items.filter(item => item.str && item.str.trim());
@@ -62,22 +105,16 @@ function getTableColumnLayout(textContent) {
   const sellerSkuX = sellerSkuLabel?.transform[4] ?? null;
 
   if (skuX == null && sellerSkuX == null) {
-    return {
-      productColumnLeftPdf: null,
-      productColumnRightPdf: null,
-      skuColumnLeftPdf: null,
-      skuColumnRightPdf: null
-    };
+    return emptyColumnLayout();
   }
 
-  const firstDataColumn = Math.min(
-    skuX ?? Infinity,
-    sellerSkuX ?? Infinity
-  );
+  const firstDataColumn = Math.min(skuX ?? Infinity, sellerSkuX ?? Infinity);
 
   return {
     productColumnLeftPdf: productLabel?.transform[4] ?? 20,
     productColumnRightPdf: firstDataColumn - 4,
+    skuColumnXPdf: skuX,
+    sellerSkuColumnXPdf: sellerSkuX,
     skuColumnLeftPdf: skuX != null ? skuX - 2 : null,
     skuColumnRightPdf:
       sellerSkuX != null
@@ -88,28 +125,41 @@ function getTableColumnLayout(textContent) {
   };
 }
 
+function emptyColumnLayout() {
+  return {
+    productColumnLeftPdf: null,
+    productColumnRightPdf: null,
+    skuColumnXPdf: null,
+    sellerSkuColumnXPdf: null,
+    skuColumnLeftPdf: null,
+    skuColumnRightPdf: null
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Live title detection
+// ---------------------------------------------------------------------------
+
 function isGenericLiveTitle(text) {
-  const value = text.replace(/\s+/g, " ").trim();
+  const value = normalizePdfText(text);
 
   if (/LIVE\s*-\s*AS SEEN/i.test(value)) return true;
-  if (/^SCREEN\s*[23]?$/i.test(value)) return true;
-  if (/^ON\s+SCREEN\s*[23]?$/i.test(value)) return true;
+  if (/^SCREEN\s*\d*$/i.test(value)) return true;
+  if (/^ON\s+SCREEN\s*\d*$/i.test(value)) return true;
 
   return false;
 }
 
 function isMaskableLiveTitle(text) {
-  const value = text.replace(/\s+/g, " ").trim();
-
+  const value = normalizePdfText(text);
   if (isScreenIndicator(value)) return false;
-
   return /LIVE\s*-\s*AS SEEN/i.test(value);
 }
 
 function isScreenIndicator(text) {
-  const value = text.replace(/\s+/g, " ").trim();
+  const value = normalizePdfText(text);
   return (
-    /^SCREEN\s*[23]?$/i.test(value) || /^ON\s+SCREEN\s*[23]?$/i.test(value)
+    /^SCREEN\s*\d*$/i.test(value) || /^ON\s+SCREEN\s*\d*$/i.test(value)
   );
 }
 
@@ -125,7 +175,7 @@ function isTableEndText(text) {
 function getPageSheetIndex(textContent) {
   const pageText = textContent.items.map(item => item.str).join(" ");
   const liveMatch = pageText.match(
-    /([A-Z]+\s+LIVE\s*-\s*AS SEEN ON(?:\s+SCREEN)?(?:\s+[23])?)/i
+    /([A-Z]+\s+LIVE\s*-\s*AS SEEN ON(?:\s+SCREEN)?(?:\s+\d+)?)/i
   );
 
   if (!liveMatch) {
@@ -135,30 +185,34 @@ function getPageSheetIndex(textContent) {
   return getLiveSheetIndex(liveMatch[1], liveMatch[1].split(/\s+/));
 }
 
+function detectSheetIndexFromTitle(titleText, titleLines, pageSheetIndex, lastDetectedSheetIndex) {
+  if (/LIVE|SCREEN/i.test(titleText)) {
+    return getLiveSheetIndex(titleText, titleLines);
+  }
+
+  if (lastDetectedSheetIndex != null) {
+    return lastDetectedSheetIndex;
+  }
+
+  return pageSheetIndex;
+}
+
+// ---------------------------------------------------------------------------
+// Main packing-list parser
+// ---------------------------------------------------------------------------
+
 function parseTikTokPackingItems(textContent) {
   const items = textContent.items.filter(item => item.str && item.str.trim());
   const layout = getTableColumnLayout(textContent);
-
   const sellerSkuLabel = findLabelItem(items, /Seller\s*SKU/i);
-  const skuLabel = items.find(item => {
-    const text = item.str.trim();
-    return text === "SKU" || (text.includes("SKU") && !/Seller/i.test(text));
-  });
-  const productLabel = findLabelItem(items, /Product Name/i);
-  const qtyTotalLabel = findLabelItem(items, /Qty Total/i);
 
   if (!sellerSkuLabel) {
     return parseTikTokPackingItemsFromRows(textContent.items);
   }
 
-  const headerY = Math.max(
-    sellerSkuLabel.transform[5],
-    skuLabel?.transform[5] ?? 0,
-    productLabel?.transform[5] ?? 0
-  );
-
-  const tableBottomY = qtyTotalLabel?.transform[5] ?? 0;
-  const sellerSkuX = sellerSkuLabel.transform[4];
+  const headerY = getHeaderBaselineY(items, sellerSkuLabel);
+  const tableBottomY = findLabelItem(items, /Qty Total/i)?.transform[5] ?? 0;
+  const sellerSkuX = layout.sellerSkuColumnXPdf ?? sellerSkuLabel.transform[4];
   const productColumnRight = layout.productColumnRightPdf ?? sellerSkuX - 20;
   const pageSheetIndex = getPageSheetIndex(textContent);
 
@@ -167,12 +221,7 @@ function parseTikTokPackingItems(textContent) {
     return y < headerY - 2 && y > tableBottomY + 2;
   });
 
-  const hasAnySale = dataItems.some(item => {
-    if (!/^\d+$/.test(item.str.trim())) return false;
-    return Math.abs(item.transform[4] - sellerSkuX) <= 40;
-  });
-
-  if (!hasAnySale) {
+  if (!hasSellerSkuValues(dataItems, sellerSkuX)) {
     return parseTikTokPackingItemsFromRows(textContent.items);
   }
 
@@ -180,80 +229,124 @@ function parseTikTokPackingItems(textContent) {
     dataItems,
     sellerSkuX,
     productColumnRight,
-    pageSheetIndex
+    pageSheetIndex,
+    tableBottomY
   );
+}
+
+function getHeaderBaselineY(items, sellerSkuLabel) {
+  const skuLabel = items.find(item => {
+    const text = item.str.trim();
+    return text === "SKU" || (text.includes("SKU") && !/Seller/i.test(text));
+  });
+  const productLabel = findLabelItem(items, /Product Name/i);
+
+  return Math.max(
+    sellerSkuLabel.transform[5],
+    skuLabel?.transform[5] ?? 0,
+    productLabel?.transform[5] ?? 0
+  );
+}
+
+function collectSaleItemsByRow(dataItems, sellerSkuX) {
+  const sales = [];
+
+  for (const row of groupTextItemsByRow(dataItems)) {
+    const saleItem = getSellerSkuFromRow(row.items, sellerSkuX);
+    if (saleItem) {
+      sales.push(saleItem);
+    }
+  }
+
+  return sales.sort((a, b) => b.transform[5] - a.transform[5]);
+}
+
+function computeSaleRowBounds(sortedSales, tableBottomY) {
+  return sortedSales.map((sale, idx) => {
+    const saleY = sale.transform[5];
+    const prevSaleY = idx > 0 ? sortedSales[idx - 1].transform[5] : null;
+    const nextSaleY =
+      idx < sortedSales.length - 1 ? sortedSales[idx + 1].transform[5] : null;
+
+    const upperBound = prevSaleY != null ? (prevSaleY + saleY) / 2 : Infinity;
+    let lowerBound;
+
+    if (nextSaleY != null) {
+      lowerBound = (saleY + nextSaleY) / 2;
+    } else {
+      lowerBound = tableBottomY + ROW_Y_TOLERANCE;
+    }
+
+    return { upperBound, lowerBound };
+  });
+}
+
+function collectTitleItemsForSaleBand(
+  dataItems,
+  productColumnRight,
+  lowerBound,
+  upperBound
+) {
+  const titleItems = dataItems.filter(item => {
+    const text = item.str.trim();
+    if (!text) return false;
+    if (item.transform[4] >= productColumnRight) return false;
+    if (/^\d+$/.test(text)) return false;
+    if (isTableEndText(text)) return false;
+
+    const y = item.transform[5];
+    return y > lowerBound && y < upperBound;
+  });
+
+  titleItems.sort(
+    (a, b) =>
+      b.transform[5] - a.transform[5] ||
+      a.transform[4] - b.transform[4]
+  );
+
+  return titleItems;
 }
 
 function buildPackingItemsFromOrderedItems(
   dataItems,
   sellerSkuX,
   productColumnRight,
-  pageSheetIndex
+  pageSheetIndex,
+  tableBottomY = 0
 ) {
-  const saleItems = dataItems.filter(item => {
-    const text = item.str.trim();
-    if (!/^\d+$/.test(text)) return false;
-    return Math.abs(item.transform[4] - sellerSkuX) <= 40;
-  });
+  if (sellerSkuX == null) return [];
 
-  if (saleItems.length === 0) return [];
+  const sortedSales = collectSaleItemsByRow(dataItems, sellerSkuX);
+  if (sortedSales.length === 0) return [];
 
-  const sortedSales = [...saleItems].sort(
-    (a, b) => b.transform[5] - a.transform[5]
-  );
-
-  const rowBounds = sortedSales.map((sale, idx) => {
-    const saleY = sale.transform[5];
-    const upperBound =
-      idx === 0
-        ? Infinity
-        : (sortedSales[idx - 1].transform[5] + saleY) / 2;
-    const lowerBound =
-      idx === sortedSales.length - 1
-        ? -Infinity
-        : (saleY + sortedSales[idx + 1].transform[5]) / 2;
-    return { upperBound, lowerBound };
-  });
-
+  const rowBounds = computeSaleRowBounds(sortedSales, tableBottomY);
   let lastDetectedSheetIndex = null;
   const results = [];
 
-  sortedSales.forEach((sale, idx) => {
+  sortedSales.forEach((saleItem, idx) => {
     const { upperBound, lowerBound } = rowBounds[idx];
-
-    const titleItems = dataItems.filter(item => {
-      const text = item.str.trim();
-      if (!text) return false;
-      if (item.transform[4] >= productColumnRight) return false;
-      if (/^\d+$/.test(text)) return false;
-      if (isTableEndText(text)) return false;
-
-      const y = item.transform[5];
-      return y > lowerBound && y < upperBound;
-    });
-
-    titleItems.sort(
-      (a, b) =>
-        b.transform[5] - a.transform[5] ||
-        a.transform[4] - b.transform[4]
+    const titleItems = collectTitleItemsForSaleBand(
+      dataItems,
+      productColumnRight,
+      lowerBound,
+      upperBound
     );
-
     const titleLines = groupProductLines(titleItems);
     const titleText = titleLines.join(" ");
+    const sheetIndex = detectSheetIndexFromTitle(
+      titleText,
+      titleLines,
+      pageSheetIndex,
+      lastDetectedSheetIndex
+    );
 
-    let sheetIndex;
     if (/LIVE|SCREEN/i.test(titleText)) {
-      sheetIndex = getLiveSheetIndex(titleText, titleLines);
       lastDetectedSheetIndex = sheetIndex;
-    } else if (lastDetectedSheetIndex != null) {
-      sheetIndex = lastDetectedSheetIndex;
-    } else {
-      sheetIndex = pageSheetIndex;
     }
 
     results.push({
-      saleNumber: sale.str.trim(),
-      saleItem: sale,
+      saleNumber: saleItem.str.trim(),
+      saleItem,
       liveTitle: titleText,
       sheetIndex,
       productItems: titleItems
@@ -265,8 +358,52 @@ function buildPackingItemsFromOrderedItems(
 
 function parseTikTokPackingItemsFromRows(rawItems) {
   const rows = groupTextItemsByRow(rawItems);
+  const headerIdx = findPackingTableHeaderRow(rows);
 
-  const headerIdx = rows.findIndex(row => {
+  if (headerIdx < 0) {
+    return parseLooseNumericRows(rows);
+  }
+
+  const headerRow = rows[headerIdx];
+  const sellerSkuX = findColumnX(headerRow, "Seller SKU");
+  const skuX = findColumnX(headerRow, "SKU");
+
+  if (sellerSkuX == null) {
+    return parseLooseNumericRows(rows);
+  }
+
+  const columnCutoff = Math.min(sellerSkuX ?? Infinity, skuX ?? Infinity);
+  const productColumnRight = columnCutoff - 8;
+  const dataItems = [];
+
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (isTableEndText(row.text)) break;
+    dataItems.push(...row.items);
+  }
+
+  const pageSheetIndex = getPageSheetIndex({ items: rawItems });
+  const tableBottomY =
+    rows.find(row => isTableEndText(row.text))?.y ??
+    rows[rows.length - 1]?.y ??
+    0;
+  const results = buildPackingItemsFromOrderedItems(
+    dataItems,
+    sellerSkuX,
+    productColumnRight,
+    pageSheetIndex,
+    tableBottomY
+  );
+
+  if (results.length > 0) {
+    return results;
+  }
+
+  return parseLooseNumericRows(rows);
+}
+
+function findPackingTableHeaderRow(rows) {
+  return rows.findIndex(row => {
     const text = row.text;
     return (
       text.includes("Qty") &&
@@ -274,59 +411,48 @@ function parseTikTokPackingItemsFromRows(rawItems) {
       (text.includes("SKU") || text.includes("Product"))
     );
   });
+}
 
-  if (headerIdx < 0) return [];
+function parseLooseNumericRows(rows) {
+  const results = [];
+  let lastDetectedSheetIndex = getPageSheetIndex({
+    items: rows.flatMap(r => r.items)
+  });
 
-  const headerRow = rows[headerIdx];
-  const sellerSkuX = findColumnX(headerRow, "Seller SKU");
-  const skuX = findColumnX(headerRow, "SKU");
-  const columnCutoff = Math.min(
-    sellerSkuX ?? Infinity,
-    skuX ?? Infinity
-  );
-  const productColumnRight = columnCutoff - 8;
-
-  const dataItems = [];
-  for (let i = headerIdx + 1; i < rows.length; i++) {
-    const row = rows[i];
+  for (const row of rows) {
     if (isTableEndText(row.text)) break;
-    dataItems.push(...row.items);
-  }
 
-  return buildPackingItemsFromOrderedItems(
-    dataItems,
-    sellerSkuX,
-    productColumnRight,
-    getPageSheetIndex({ items: rawItems })
-  );
-}
+    const saleItem = row.items.find(item => /^\d+$/.test(item.str.trim()));
+    if (!saleItem) continue;
 
-function findColumnX(headerRow, label) {
-  for (const item of headerRow.items) {
-    if (item.str.includes(label)) {
-      return item.transform[4];
+    const titleItems = row.items.filter(item => {
+      const text = item.str.trim();
+      if (!text || /^\d+$/.test(text) || isTableEndText(text)) return false;
+      return item !== saleItem;
+    });
+
+    const titleLines = groupProductLines(titleItems);
+    const titleText = titleLines.join(" ");
+
+    if (/LIVE|SCREEN/i.test(titleText)) {
+      lastDetectedSheetIndex = getLiveSheetIndex(titleText, titleLines);
     }
+
+    results.push({
+      saleNumber: saleItem.str.trim(),
+      saleItem,
+      liveTitle: titleText,
+      sheetIndex: lastDetectedSheetIndex,
+      productItems: titleItems
+    });
   }
 
-  return null;
+  return results;
 }
 
-function findItemAtColumn(row, columnX, tolerance = 40) {
-  if (columnX == null) return null;
-
-  let best = null;
-  let bestDist = Infinity;
-
-  for (const item of row.items) {
-    const dist = Math.abs(item.transform[4] - columnX);
-    if (dist <= tolerance && dist < bestDist) {
-      bestDist = dist;
-      best = item;
-    }
-  }
-
-  return best;
-}
+// ---------------------------------------------------------------------------
+// Text fallback matcher (content.js overlay)
+// ---------------------------------------------------------------------------
 
 function matchTikTokPackingItems(fullText, maps) {
   const matches = [];
@@ -375,7 +501,7 @@ function matchSellerSkuFallback(fullText, maps) {
   if (!sellerSkuSection) return matches;
 
   const liveMatch = fullText.match(
-    /([A-Z]+\s+LIVE\s*-\s*AS SEEN ON SCREEN(?:\s+[23])?)/i
+    /([A-Z]+\s+LIVE\s*-\s*AS SEEN ON SCREEN(?:\s+\d+)?)/i
   );
   const liveTitle = liveMatch ? liveMatch[1] : "";
   const sheetIndex = getLiveSheetIndex(liveTitle);

@@ -18,6 +18,23 @@ body {
   cursor: pointer;
 }
 
+#printBtn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.errorBanner {
+  margin: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #fff4f4;
+  border: 1px solid #e4b4b4;
+  color: #7a1e1e;
+  white-space: pre-line;
+  line-height: 1.45;
+  font-size: 13px;
+}
+
 .printHint {
   margin-left: 12px;
   font-size: 12px;
@@ -86,7 +103,8 @@ body {
   }
 
   #toolbar,
-  .printHint {
+  .printHint,
+  .errorBanner {
     display: none;
   }
 
