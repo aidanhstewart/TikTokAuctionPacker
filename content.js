@@ -7,22 +7,15 @@
 
   if (!isPdf) return;
 
-  const stored = await chrome.storage.local.get([
-    "sheetUrl1",
-    "sheetUrl2",
-    "sheetUrl"
-  ]);
+  const stored = await chrome.storage.local.get(getSheetStorageKeys());
+  const maps = await resolveSheetMaps(stored);
 
-  const sheetUrl1 = stored.sheetUrl1 || stored.sheetUrl;
-  const sheetUrl2 = stored.sheetUrl2;
-
-  if (!sheetUrl1 || !sheetUrl2) {
-    alert("Save both Live 1 and Live 2 Google Sheet URLs in the extension popup.");
+  if (!maps) {
+    alert(getMissingSetupMessage());
     return;
   }
 
   try {
-    const maps = await loadSheetMaps(sheetUrl1, sheetUrl2);
 
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       chrome.runtime.getURL("pdfjs/pdf.worker.min.js");
@@ -70,7 +63,7 @@ function injectIntoPage(maps, fullText) {
     overlay.innerHTML += `
       <div style="background:#f5f5f5;padding:12px;border-radius:10px;margin-bottom:10px;border:1px solid #ddd;">
         <div style="font-weight:bold;font-size:16px;">
-          Live ${sheetIndex} · Seller SKU ${saleNumber}
+          Live ${sheetIndex} | Seller SKU ${saleNumber}
         </div>
         <div style="font-size:12px;color:#666;margin-top:4px;">
           ${liveTitle}

@@ -2,29 +2,17 @@
 <!DOCTYPE html>
 <html>
 <head>
-
-  <title>
-    TikTok Shop PDF Viewer
-  </title>
-
-  <link
-    rel="stylesheet"
-    href="styles.css"
-  />
-
+  <meta charset="UTF-8">
+  <title>TikTok Shop PDF Viewer</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
-
 <body>
-
   <div id="toolbar">
-
-    <button id="printBtn">
-      Print
-    </button>
-    <span class="printHint">TSC: 4×6 label, scale 100%, no fit-to-page</span>
-
+    <button id="printBtn">Print</button>
+    <span class="printHint">TSC: 4x6 label, scale 100%, no fit-to-page</span>
   </div>
 
+  <div id="errorBanner" class="errorBanner" hidden></div>
   <div id="pdfContainer"></div>
 
   <script src="pdfjs/pdf.min.js"></script>

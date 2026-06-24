@@ -2,15 +2,27 @@
 <!DOCTYPE html>
 <html>
 <head>
-
+  <meta charset="UTF-8">
   <title>TikTok Shop Enhancer</title>
-
   <style>
-
     body {
-      width: 340px;
+      width: 360px;
+      max-height: 620px;
+      overflow-y: auto;
       padding: 15px;
-      font-family: Arial;
+      font-family: Arial, sans-serif;
+      color: #222;
+    }
+
+    h2 {
+      margin: 0 0 4px;
+      font-size: 18px;
+    }
+
+    .subtitle {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 14px;
     }
 
     label {
@@ -21,53 +33,153 @@
       margin-bottom: 6px;
     }
 
-    input {
+    input[type="text"],
+    input[type="file"] {
       width: 100%;
       padding: 10px;
       box-sizing: border-box;
     }
 
+    input[type="file"] {
+      padding: 8px;
+    }
+
     button {
       width: 100%;
-      margin-top: 14px;
+      margin-top: 10px;
       padding: 10px;
       cursor: pointer;
+    }
+
+    button.secondary {
+      background: #f3f3f3;
+      border: 1px solid #ccc;
+    }
+
+    button.danger {
+      background: #fff5f5;
+      border: 1px solid #e8b4b4;
+      color: #8a1f1f;
     }
 
     .hint {
       font-size: 11px;
       color: #555;
       margin-top: 4px;
-      line-height: 1.4;
+      line-height: 1.45;
     }
 
+    .setupMode {
+      font-size: 12px;
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      background: #f7f7f7;
+      border: 1px solid #ddd;
+    }
+
+    .setupMode.ready {
+      background: #eef8ee;
+      border-color: #b9d9b9;
+    }
+
+    .status {
+      font-size: 12px;
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      background: #f0f7ff;
+      border: 1px solid #c8ddf5;
+      line-height: 1.45;
+      white-space: pre-line;
+    }
+
+    .status.empty {
+      background: #fafafa;
+      border-color: #ddd;
+      color: #666;
+    }
+
+    .status.warn {
+      background: #fff8e8;
+      border-color: #e8d39b;
+    }
+
+    details {
+      margin-top: 16px;
+      border-top: 1px solid #ddd;
+      padding-top: 12px;
+    }
+
+    summary {
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: bold;
+      color: #444;
+    }
+
+    .buttonRow {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .buttonRow button {
+      margin-top: 0;
+    }
   </style>
-
 </head>
-
 <body>
-
   <h2>TikTok Shop Enhancer</h2>
+  <div class="subtitle">Upload one workbook, then open packing-list PDFs.</div>
 
-  <label for="sheetUrl1">Live 1 sheet</label>
-  <input
-    id="sheetUrl1"
-    placeholder="DAY LIVE - AS SEEN ON SCREEN"
-  />
-  <div class="hint">SKUs 1–300 from the first live.</div>
+  <div id="setupMode" class="setupMode">Checking setup...</div>
 
-  <label for="sheetUrl2">Live 2 sheet</label>
-  <input
-    id="sheetUrl2"
-    placeholder="DAY LIVE - AS SEEN ON SCREEN 2"
-  />
-  <div class="hint">SKUs 1–300 from the second live (after TikTok resets).</div>
+  <label for="workbookFile">Excel workbook (recommended)</label>
+  <input id="workbookFile" type="file" accept=".xlsx,.xls,.xlsm" />
+  <div class="hint">
+    Google Sheets: File &gt; Download &gt; Microsoft Excel (.xlsx).<br>
+    Each tab = one live (tab 1 = Live 1, tab 2 = Live 2, etc.).<br>
+    Column A = sale #, column B = product name. Row 1 is the header.
+  </div>
 
-  <button id="saveBtn">
-    Save
-  </button>
+  <div id="workbookStatus" class="status empty">No workbook loaded.</div>
 
+  <div class="buttonRow">
+    <button id="clearWorkbookBtn" class="secondary" type="button">Clear workbook</button>
+    <button id="reloadWorkbookBtn" class="secondary" type="button" disabled>Reload file</button>
+  </div>
+
+  <details>
+    <summary>Legacy: Google Sheet links (fallback)</summary>
+
+    <label for="sheetUrl1">Live 1 sheet</label>
+    <input id="sheetUrl1" placeholder="DAY LIVE - AS SEEN ON SCREEN" />
+
+    <label for="sheetUrl2">Live 2 sheet</label>
+    <input id="sheetUrl2" placeholder="DAY LIVE - AS SEEN ON SCREEN 2" />
+
+    <label for="sheetUrl3">Live 3 sheet (optional)</label>
+    <input id="sheetUrl3" placeholder="DAY LIVE - AS SEEN ON SCREEN 3" />
+
+    <label for="sheetUrl4">Live 4 sheet (optional)</label>
+    <input id="sheetUrl4" placeholder="DAY LIVE - AS SEEN ON SCREEN 4" />
+
+    <label for="sheetUrl5">Live 5 sheet (optional)</label>
+    <input id="sheetUrl5" placeholder="DAY LIVE - AS SEEN ON SCREEN 5" />
+
+    <label for="sheetUrl6">Live 6 sheet (optional)</label>
+    <input id="sheetUrl6" placeholder="DAY LIVE - AS SEEN ON SCREEN 6" />
+
+    <div class="hint">Only used when no workbook is loaded. Live 1 and Live 2 are required.</div>
+
+    <button id="saveBtn" type="button">Save sheet links</button>
+    <button id="clearLinksBtn" class="danger" type="button">Clear sheet links</button>
+  </details>
+
+  <script src="xlsx.full.min.js"></script>
+  <script src="sheetUtils.js"></script>
+  <script src="workbookParser.js"></script>
   <script src="popup.js"></script>
-
 </body>
 </html>

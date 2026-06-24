@@ -1,4 +1,4 @@
-// viewer.js — tuned for TSC thermal printers (203 DPI, 4×6 labels)
+// viewer.js - TSC thermal printers (203 DPI, 4x6 labels)
 
 const THERMAL = {
   widthIn: 4,
@@ -9,40 +9,132 @@ const THERMAL = {
 const RENDER_SCALE = 2;
 const MONO_THRESHOLD = 165;
 
-(async function () {
-  const params = new URLSearchParams(window.location.search);
-  const pdfUrl = params.get("pdf");
+// ---------------------------------------------------------------------------
+// Startup
+// ---------------------------------------------------------------------------
 
+(async function initViewer() {
+  try {
+    const pdfUrl = getPdfUrlFromQuery();
+    const maps = await loadProductMaps();
+    configurePdfWorker();
+    const pdf = await loadPdfDocument(pdfUrl);
+
+    await renderAllPages(pdf, maps);
+    pdf.destroy();
+    wirePrintButton();
+  } catch (err) {
+    console.error("[TikTokPacker]", err);
+    showViewerError(formatViewerError(err));
+  }
+})();
+
+function getPdfUrlFromQuery() {
+  const pdfUrl = new URLSearchParams(window.location.search).get("pdf");
   if (!pdfUrl) {
-    alert("No PDF URL supplied.");
-    return;
+    throw new Error("NO_PDF_URL");
   }
+  return pdfUrl;
+}
 
-  const stored = await chrome.storage.local.get([
-    "sheetUrl1",
-    "sheetUrl2",
-    "sheetUrl"
-  ]);
-
-  const sheetUrl1 = stored.sheetUrl1 || stored.sheetUrl;
-  const sheetUrl2 = stored.sheetUrl2;
-
-  if (!sheetUrl1) {
-    alert("No Live 1 Google Sheet URL saved.");
-    return;
+async function loadProductMaps() {
+  const stored = await chrome.storage.local.get(getSheetStorageKeys());
+  const maps = await resolveSheetMaps(stored);
+  if (!maps) {
+    throw new Error("NO_PRODUCT_DATA");
   }
+  return maps;
+}
 
-  if (!sheetUrl2) {
-    alert("No Live 2 Google Sheet URL saved.");
-    return;
-  }
-
-  const maps = await loadSheetMaps(sheetUrl1, sheetUrl2);
-
+function configurePdfWorker() {
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     chrome.runtime.getURL("pdfjs/pdf.worker.min.js");
+}
 
-  const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
+function wirePrintButton() {
+  document.getElementById("printBtn").addEventListener("click", () => {
+    setTimeout(() => window.print(), 80);
+  });
+}
+
+function formatViewerError(err) {
+  if (err?.message === "NO_PDF_URL") {
+    return "No PDF URL was provided to the viewer.";
+  }
+
+  if (err?.message === "NO_PRODUCT_DATA") {
+    return getMissingSetupMessage();
+  }
+
+  if (err?.message === "LOCAL_FILE_BLOCKED") {
+    return [
+      "Could not read the local PDF file.",
+      "",
+      "In chrome://extensions, open this extension and enable:",
+      "Allow access to file URLs",
+      "",
+      "Then reopen the PDF."
+    ].join("\n");
+  }
+
+  if (err?.message?.startsWith("Failed to read local PDF")) {
+    return [
+      err.message,
+      "",
+      "Check that the file still exists and that file URL access is enabled for this extension."
+    ].join("\n");
+  }
+
+  return [
+    "Failed to process this packing-list PDF.",
+    "",
+    String(err?.message || err),
+    "",
+    "Try reopening the PDF. If it keeps failing, check the browser console for details."
+  ].join("\n");
+}
+
+function showViewerError(message) {
+  const banner = document.getElementById("errorBanner");
+  const printBtn = document.getElementById("printBtn");
+  if (banner) {
+    banner.textContent = message;
+    banner.hidden = false;
+  } else {
+    alert(message);
+  }
+  if (printBtn) printBtn.disabled = true;
+}
+
+// ---------------------------------------------------------------------------
+// PDF loading
+// ---------------------------------------------------------------------------
+
+async function loadPdfDocument(url) {
+  if (url.startsWith("file://")) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to read local PDF (${response.status})`);
+      }
+      const data = await response.arrayBuffer();
+      return pdfjsLib.getDocument({ data }).promise;
+    } catch (err) {
+      if (String(err).includes("Failed to fetch")) {
+        throw new Error("LOCAL_FILE_BLOCKED");
+      }
+      throw err;
+    }
+  }
+
+  return pdfjsLib.getDocument(url).promise;
+}
+
+// ---------------------------------------------------------------------------
+// Page rendering
+// ---------------------------------------------------------------------------
+
+async function renderAllPages(pdf, maps) {
   const container = document.getElementById("pdfContainer");
   const targetW = THERMAL.widthIn * THERMAL.dpi;
   const targetH = THERMAL.heightIn * THERMAL.dpi;
@@ -50,112 +142,135 @@ const MONO_THRESHOLD = 165;
   const renderH = targetH * RENDER_SCALE;
 
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-    const page = await pdf.getPage(pageNum);
-    const baseViewport = page.getViewport({ scale: 1 });
-    const scale = renderW / baseViewport.width;
-    const viewport = page.getViewport({ scale });
-
-    const wrapper = document.createElement("div");
-    wrapper.className = "pageWrapper";
-
-    const canvas = document.createElement("canvas");
-    const context = canvas.getContext("2d", { alpha: false });
-
-    canvas.width = renderW;
-    canvas.height = renderH;
-    context.fillStyle = "#ffffff";
-    context.fillRect(0, 0, renderW, renderH);
-    context.imageSmoothingEnabled = false;
-
-    wrapper.appendChild(canvas);
-    container.appendChild(wrapper);
-
-    await page.render({
-      canvasContext: context,
-      viewport,
-      intent: "print"
-    }).promise;
-
-    const textContent = await page.getTextContent();
-    const columnLayout = getTableColumnLayout(textContent);
-
-    maskCoverableLiveTitles(context, textContent, viewport, columnLayout);
-
-    const packingItems = parseTikTokPackingItems(textContent);
-    const overlayItems = [];
-
-    for (const {
-      saleNumber,
-      sheetIndex,
-      saleItem,
-      productItems,
-      liveTitle
-    } of packingItems) {
-      if (!needsSheetOverlay(liveTitle)) {
-        console.log("[TikTokPacker] marketplace row — left as-is", {
-          page: pageNum,
-          saleNumber,
-          productTitle: liveTitle
-        });
-        continue;
-      }
-
-      const bounds = getLineItemBounds(
-        productItems,
-        saleItem,
-        viewport,
-        columnLayout
-      );
-
-      const productName = lookupProduct(maps, sheetIndex, saleNumber);
-
-      console.log("[TikTokPacker]", {
-        page: pageNum,
-        saleNumber,
-        sheetIndex,
-        detectedTitle: liveTitle,
-        lookedUpProduct: productName
-      });
-
-      overlayItems.push({ bounds, productName, sheetIndex });
-    }
-
-    maskSkuColumnHeader(context, textContent, viewport, columnLayout);
-
-    const preview = attachPreviewCanvas(wrapper, canvas, targetW, targetH);
-    const previewCtx = preview.getContext("2d", { alpha: false });
-
-    for (const { bounds, productName, sheetIndex } of overlayItems) {
-      drawLineItemOverlay(
-        previewCtx,
-        scaleOverlayBounds(bounds, RENDER_SCALE),
-        productName,
-        sheetIndex
-      );
-    }
-
-    // Hi-res canvas is only needed to build the 1× preview; drop it to save GPU RAM.
-    canvas.width = 0;
-    canvas.height = 0;
-    canvas.remove();
+    await renderPage({
+      pdf,
+      pageNum,
+      maps,
+      container,
+      targetW,
+      targetH,
+      renderW,
+      renderH
+    });
   }
+}
 
-  const printBtn = document.getElementById("printBtn");
-  printBtn.addEventListener("click", async () => {
-    printBtn.disabled = true;
-    printBtn.textContent = "Preparing…";
+async function renderPage({
+  pdf,
+  pageNum,
+  maps,
+  container,
+  targetW,
+  targetH,
+  renderW,
+  renderH
+}) {
+  const page = await pdf.getPage(pageNum);
+  const baseViewport = page.getViewport({ scale: 1 });
+  const scale = renderW / baseViewport.width;
+  const viewport = page.getViewport({ scale });
 
-    try {
-      await flattenPagesForPrint();
-      setTimeout(() => window.print(), 80);
-    } finally {
-      printBtn.disabled = false;
-      printBtn.textContent = "Print";
-    }
+  const wrapper = document.createElement("div");
+  wrapper.className = "pageWrapper";
+  container.appendChild(wrapper);
+
+  const canvas = createRenderCanvas(renderW, renderH);
+  const context = canvas.getContext("2d", {
+    alpha: false,
+    willReadFrequently: true
   });
 
-  window.addEventListener("afterprint", restorePagesAfterPrint);
-})();
+  await page.render({
+    canvasContext: context,
+    viewport,
+    intent: "print"
+  }).promise;
+
+  const textContent = await page.getTextContent();
+  const columnLayout = getTableColumnLayout(textContent);
+  const searchOverlays = [];
+
+  maskCoverableLiveTitles(context, textContent, viewport, columnLayout);
+
+  const packingItems = parseTikTokPackingItems(textContent);
+  for (const item of packingItems) {
+    const overlay = buildLineItemOverlay(item, maps, viewport, columnLayout, pageNum);
+    if (overlay) {
+      drawLineItemOverlay(context, overlay.bounds, overlay.productName, overlay.sheetIndex);
+      searchOverlays.push({
+        text: overlay.searchText,
+        bounds: overlay.bounds
+      });
+    }
+  }
+
+  maskSkuColumnHeader(context, textContent, viewport, columnLayout);
+
+  const pageContent = attachPreviewCanvas(wrapper, canvas, targetW, targetH);
+  attachSearchTextLayer(
+    pageContent,
+    textContent,
+    viewport,
+    searchOverlays,
+    targetW,
+    targetH
+  );
+
+  page.cleanup();
+}
+
+function createRenderCanvas(width, height) {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d", {
+    alpha: false,
+    willReadFrequently: true
+  });
+
+  canvas.width = width;
+  canvas.height = height;
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+  context.imageSmoothingEnabled = false;
+  return canvas;
+}
+
+function buildLineItemOverlay(item, maps, viewport, columnLayout, pageNum) {
+  const {
+    saleNumber,
+    sheetIndex,
+    saleItem,
+    productItems,
+    liveTitle
+  } = item;
+
+  const bounds = getLineItemBounds(
+    productItems,
+    saleItem,
+    viewport,
+    columnLayout
+  );
+  const productName = lookupProduct(maps, sheetIndex, saleNumber);
+
+  console.log("[TikTokPacker]", {
+    page: pageNum,
+    saleNumber,
+    sheetIndex,
+    detectedTitle: liveTitle,
+    lookedUpProduct: productName
+  });
+
+  const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
+  return {
+    bounds,
+    productName,
+    sheetIndex,
+    searchText: productName ? `${sheetTag}${productName}` : `${sheetTag}?`
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Masking + overlays
+// ---------------------------------------------------------------------------
 
 function maskCoverableLiveTitles(context, textContent, viewport, layout) {
   if (layout.productColumnRightPdf == null) {
@@ -208,60 +323,6 @@ function maskCoverableLiveTitles(context, textContent, viewport, layout) {
   }
 }
 
-function attachPreviewCanvas(wrapper, hiResCanvas, targetW, targetH) {
-  hiResCanvas.className = "hiResCanvas";
-  hiResCanvas.style.display = "none";
-
-  const preview = document.createElement("canvas");
-  preview.width = targetW;
-  preview.height = targetH;
-  preview.className = "pageCanvas";
-
-  const ctx = preview.getContext("2d", { alpha: false });
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(hiResCanvas, 0, 0, targetW, targetH);
-
-  wrapper.appendChild(preview);
-  return preview;
-}
-
-function scaleOverlayBounds(bounds, renderScale) {
-  const factor = 1 / renderScale;
-
-  const scaleBox = box => {
-    if (!box) return null;
-
-    const scaled = {
-      left: Math.round(box.left * factor),
-      top: Math.round(box.top * factor),
-      width: Math.round(box.width * factor),
-      height: Math.round(box.height * factor)
-    };
-
-    if (box.productRight != null) {
-      scaled.productRight = Math.round(box.productRight * factor);
-    }
-
-    if (box.screenExclude) {
-      scaled.screenExclude = {
-        top: Math.round(box.screenExclude.top * factor),
-        bottom: Math.round(box.screenExclude.bottom * factor)
-      };
-    }
-
-    return scaled;
-  };
-
-  return {
-    product: {
-      ...scaleBox(bounds.product),
-      fontSize: bounds.product.fontSize * factor,
-      lineHeight: bounds.product.lineHeight
-    },
-    overlayColumn: scaleBox(bounds.overlayColumn)
-  };
-}
-
 function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
   if (!bounds.overlayColumn) return;
 
@@ -295,13 +356,13 @@ function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
   const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
   const overlayText = productName
     ? `${sheetTag}${productName}`
-    : `${sheetTag}(no match)`;
+    : `${sheetTag}?`;
 
   const padX = 2;
   const padY = 1;
   const maxWidth = Math.max(overlayWidth - padX * 2, 0);
   const lineHeightFactor = bounds.product.lineHeight;
-  let fontSize = Math.max(8, Math.round(bounds.product.fontSize * 1.12));
+  let fontSize = Math.round(bounds.product.fontSize * 1.12);
 
   context.save();
   context.beginPath();
@@ -315,8 +376,7 @@ function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
   while (fontSize >= 8) {
     context.font = `bold ${fontSize}px Helvetica, Arial, sans-serif`;
     lines = wrapTextLines(context, overlayText, maxWidth);
-    const lineHeight = Math.round(fontSize * lineHeightFactor);
-    const totalHeight = lines.length * lineHeight;
+    const totalHeight = lines.length * fontSize * lineHeightFactor;
 
     if (totalHeight <= overlayHeight - padY * 2 || fontSize <= 8) {
       break;
@@ -325,17 +385,17 @@ function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
     fontSize -= 1;
   }
 
-  const lineHeight = Math.round(fontSize * lineHeightFactor);
+  const lineHeight = fontSize * lineHeightFactor;
   const totalTextHeight = lines.length * lineHeight;
   const textY =
     overlayTop +
-    Math.max(padY, Math.round((overlayHeight - totalTextHeight) / 2) - 4);
+    Math.max(padY, (overlayHeight - totalTextHeight) / 2 - 7);
 
   for (let i = 0; i < lines.length; i++) {
     context.fillText(
       lines[i],
-      overlayLeft + padX,
-      textY + i * lineHeight
+      Math.round(overlayLeft + padX),
+      Math.round(textY + i * lineHeight)
     );
   }
 
@@ -372,6 +432,107 @@ function maskSkuColumnHeader(context, textContent, viewport, layout) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Preview + search text layer
+// ---------------------------------------------------------------------------
+
+function releaseCanvas(canvas) {
+  if (!canvas) return;
+  canvas.width = 0;
+  canvas.height = 0;
+  canvas.remove();
+}
+
+function attachPreviewCanvas(wrapper, hiResCanvas, targetW, targetH) {
+  const preview = buildPageBitmap(hiResCanvas);
+  preview.className = "pageCanvas";
+
+  const pageContent = document.createElement("div");
+  pageContent.className = "pageContent";
+  pageContent.appendChild(preview);
+
+  wrapper.appendChild(pageContent);
+  releaseCanvas(hiResCanvas);
+
+  return pageContent;
+}
+
+function appendSearchSpan(layer, text, left, top, fontSize) {
+  const span = document.createElement("span");
+  span.textContent = text;
+  span.style.left = `${left}px`;
+  span.style.top = `${top}px`;
+  span.style.fontSize = `${Math.max(fontSize, 1)}px`;
+  layer.appendChild(span);
+}
+
+function attachSearchTextLayer(
+  pageContent,
+  textContent,
+  renderViewport,
+  searchOverlays,
+  targetW,
+  targetH
+) {
+  const coordScale = targetW / renderViewport.width;
+  const textLayer = document.createElement("div");
+  textLayer.className = "textLayer";
+  textLayer.setAttribute("aria-hidden", "true");
+  textLayer.style.width = `${targetW}px`;
+  textLayer.style.height = `${targetH}px`;
+
+  for (const item of textContent.items) {
+    if (!item.str || !item.str.trim()) continue;
+
+    const tx = pdfjsLib.Util.transform(renderViewport.transform, item.transform);
+    const fontHeight =
+      Math.hypot(tx[2], tx[3]) ||
+      (item.height || 12) * renderViewport.scale;
+
+    appendSearchSpan(
+      textLayer,
+      item.str,
+      tx[4] * coordScale,
+      (tx[5] - fontHeight) * coordScale,
+      fontHeight * coordScale
+    );
+  }
+
+  for (const { text, bounds } of searchOverlays) {
+    if (!text || !bounds?.overlayColumn) continue;
+
+    const col = bounds.overlayColumn;
+    appendSearchSpan(
+      textLayer,
+      text,
+      col.left * coordScale,
+      col.top * coordScale,
+      bounds.product.fontSize * coordScale * 1.12
+    );
+  }
+
+  pageContent.appendChild(textLayer);
+  syncTextLayerScale(pageContent);
+
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver(() => syncTextLayerScale(pageContent));
+    observer.observe(pageContent);
+  }
+}
+
+function syncTextLayerScale(pageContent) {
+  const preview = pageContent.querySelector(".pageCanvas");
+  const textLayer = pageContent.querySelector(".textLayer");
+  if (!preview || !textLayer) return;
+
+  const displayW = preview.getBoundingClientRect().width;
+  if (!displayW || !preview.width) return;
+
+  const scale = displayW / preview.width;
+  textLayer.style.transform = `scale(${scale})`;
+  textLayer.style.transformOrigin = "top left";
+}
+
 function wrapTextLines(context, text, maxWidth) {
   if (maxWidth <= 0) return [text];
 
@@ -397,16 +558,76 @@ function wrapTextLines(context, text, maxWidth) {
   return lines.length ? lines : [text];
 }
 
-function toThermalMonochrome(context, width, height) {
-  let imageData;
+// ---------------------------------------------------------------------------
+// Thermal bitmap conversion
+// ---------------------------------------------------------------------------
 
-  try {
-    imageData = context.getImageData(0, 0, width, height);
-  } catch (err) {
-    console.error("[TikTokPacker] Monochrome conversion failed:", err);
-    return false;
+function buildPageBitmap(sourceCanvas) {
+  const targetW = THERMAL.widthIn * THERMAL.dpi;
+  const targetH = THERMAL.heightIn * THERMAL.dpi;
+  const ctx = sourceCanvas.getContext("2d", {
+    alpha: false,
+    willReadFrequently: true
+  });
+
+  toThermalMonochrome(ctx, sourceCanvas.width, sourceCanvas.height);
+
+  if (sourceCanvas.width === targetW && sourceCanvas.height === targetH) {
+    return sourceCanvas;
   }
 
+  return downscaleMonochrome(sourceCanvas, targetW, targetH);
+}
+
+function downscaleMonochrome(sourceCanvas, targetW, targetH) {
+  const sw = sourceCanvas.width;
+  const sh = sourceCanvas.height;
+  const scaleX = sw / targetW;
+  const scaleY = sh / targetH;
+  const srcData = sourceCanvas
+    .getContext("2d", { willReadFrequently: true })
+    .getImageData(0, 0, sw, sh).data;
+
+  const output = document.createElement("canvas");
+  output.width = targetW;
+  output.height = targetH;
+
+  const outCtx = output.getContext("2d", { alpha: false });
+  const outData = outCtx.createImageData(targetW, targetH);
+
+  for (let y = 0; y < targetH; y++) {
+    const y0 = Math.floor(y * scaleY);
+    const y1 = Math.min(Math.floor((y + 1) * scaleY), sh);
+
+    for (let x = 0; x < targetW; x++) {
+      const x0 = Math.floor(x * scaleX);
+      const x1 = Math.min(Math.floor((x + 1) * scaleX), sw);
+      let black = false;
+
+      for (let sy = y0; sy < y1 && !black; sy++) {
+        for (let sx = x0; sx < x1; sx++) {
+          if (srcData[(sy * sw + sx) * 4] < 128) {
+            black = true;
+            break;
+          }
+        }
+      }
+
+      const value = black ? 0 : 255;
+      const i = (y * targetW + x) * 4;
+      outData.data[i] = value;
+      outData.data[i + 1] = value;
+      outData.data[i + 2] = value;
+      outData.data[i + 3] = 255;
+    }
+  }
+
+  outCtx.putImageData(outData, 0, 0);
+  return output;
+}
+
+function toThermalMonochrome(context, width, height) {
+  const imageData = context.getImageData(0, 0, width, height);
   const data = imageData.data;
 
   for (let i = 0; i < data.length; i += 4) {
@@ -423,65 +644,6 @@ function toThermalMonochrome(context, width, height) {
   }
 
   context.putImageData(imageData, 0, 0);
-  return true;
-}
-
-function createPrintCanvas(sourceCanvas) {
-  const printCanvas = document.createElement("canvas");
-  printCanvas.width = sourceCanvas.width;
-  printCanvas.height = sourceCanvas.height;
-  printCanvas.className = "printCanvas";
-
-  const ctx = printCanvas.getContext("2d", { alpha: false });
-  ctx.imageSmoothingEnabled = false;
-  ctx.drawImage(sourceCanvas, 0, 0);
-
-  if (!toThermalMonochrome(ctx, printCanvas.width, printCanvas.height)) {
-    printCanvas.width = 0;
-    printCanvas.height = 0;
-    return null;
-  }
-
-  return printCanvas;
-}
-
-function yieldToBrowser() {
-  return new Promise(resolve => requestAnimationFrame(resolve));
-}
-
-async function flattenPagesForPrint() {
-  const wrappers = [...document.querySelectorAll(".pageWrapper")];
-
-  for (const wrapper of wrappers) {
-    if (wrapper.dataset.flattened === "1") continue;
-
-    const pageCanvas = wrapper.querySelector(".pageCanvas");
-    if (!pageCanvas) continue;
-
-    const printCanvas = createPrintCanvas(pageCanvas);
-    if (!printCanvas) continue;
-
-    pageCanvas.classList.add("screenOnly");
-    wrapper.appendChild(printCanvas);
-    wrapper.dataset.flattened = "1";
-
-    // Spread work across frames so large batches don't freeze the tab.
-    await yieldToBrowser();
-  }
-}
-
-function restorePagesAfterPrint() {
-  document.querySelectorAll(".pageWrapper").forEach(wrapper => {
-    wrapper.querySelectorAll(".printCanvas").forEach(canvas => {
-      canvas.width = 0;
-      canvas.height = 0;
-      canvas.remove();
-    });
-    wrapper.querySelectorAll(".pageCanvas").forEach(canvas => {
-      canvas.classList.remove("screenOnly");
-    });
-    delete wrapper.dataset.flattened;
-  });
 }
 
 function pdfXToViewport(viewport, pdfX) {
