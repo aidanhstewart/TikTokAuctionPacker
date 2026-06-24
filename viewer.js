@@ -225,7 +225,7 @@ function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
   const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
   const overlayText = productName
     ? `${sheetTag}${productName}`
-    : `${sheetTag}(no match)`;
+    : `${sheetTag}?`;
 
   const padX = 2;
   const padY = 1;

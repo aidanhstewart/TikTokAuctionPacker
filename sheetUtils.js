@@ -36,23 +36,110 @@ function getLiveSheetIndex(liveTitle, productLines) {
   return 1;
 }
 
+function normalizeSheetUrl(url) {
+  if (!url) return url;
+
+  const trimmed = url.trim();
+
+  if (/output=csv|format=csv/i.test(trimmed)) {
+    return trimmed;
+  }
+
+  const publishedMatch = trimmed.match(
+    /^(https:\/\/docs\.google\.com\/spreadsheets\/d\/e\/[^/]+)\/pub/i
+  );
+  if (publishedMatch) {
+    return `${publishedMatch[1]}/pub?output=csv`;
+  }
+
+  const idMatch = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (!idMatch || idMatch[1] === "e") {
+    return trimmed;
+  }
+
+  let gid = "0";
+  const gidMatch = trimmed.match(/[#&?]gid=(\d+)/);
+  if (gidMatch) {
+    gid = gidMatch[1];
+  }
+
+  return `https://docs.google.com/spreadsheets/d/${idMatch[1]}/export?format=csv&gid=${gid}`;
+}
+
+function parseCsvLine(line) {
+  const cols = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      cols.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+
+  cols.push(current);
+  return cols;
+}
+
+function normalizeSaleNumber(value) {
+  if (!value) return "";
+
+  return value
+    .replace(/^\ufeff/, "")
+    .replace(/\r/g, "")
+    .trim()
+    .replace(/^["']|["']$/g, "");
+}
+
 async function fetchSheetData(url) {
   if (!url) return {};
 
-  const response = await fetch(url);
+  const csvUrl = normalizeSheetUrl(url);
+  const response = await fetch(csvUrl);
+
+  if (!response.ok) {
+    console.warn("[TikTokPacker] Sheet fetch failed:", csvUrl, response.status);
+    return {};
+  }
+
   const csv = await response.text();
-  const rows = csv.split("\n");
+
+  if (csv.trimStart().startsWith("<")) {
+    console.warn(
+      "[TikTokPacker] Sheet URL returned HTML, not CSV. Use a published CSV link or a shareable sheet URL:",
+      csvUrl
+    );
+    return {};
+  }
+
+  const rows = csv.split(/\r?\n/);
   const map = {};
 
   rows.slice(1).forEach(row => {
-    const cols = row.split(",");
+    if (!row.trim()) return;
 
-    const saleNumber = cols[0]
-      ? cols[0].replace(/\r/g, "").trim()
-      : "";
-
+    const cols = parseCsvLine(row);
+    const saleNumber = normalizeSaleNumber(cols[0]);
     const productName = cols[1]
-      ? cols[1].replace(/\r/g, "").trim()
+      ? cols[1].replace(/\r/g, "").trim().replace(/^["']|["']$/g, "")
       : "";
 
     if (saleNumber && productName) {
@@ -80,9 +167,23 @@ async function loadSheetMaps(sheetUrl1, sheetUrl2, sheetUrl3) {
     maps[3] = map3;
   }
 
+  console.log("[TikTokPacker] Sheet rows loaded:", {
+    live1: Object.keys(map1).length,
+    live2: Object.keys(map2).length,
+    live3: sheetUrl3 ? Object.keys(map3).length : 0
+  });
+
+  if (Object.keys(map1).length === 0 && Object.keys(map2).length === 0) {
+    console.warn(
+      "[TikTokPacker] Both sheets are empty — check your URLs in the extension popup. " +
+        "Paste the sheet link or a File → Publish to web → CSV URL."
+    );
+  }
+
   return maps;
 }
 
 function lookupProduct(maps, sheetIndex, saleNumber) {
-  return (maps[sheetIndex] || {})[saleNumber] || null;
+  const key = normalizeSaleNumber(saleNumber);
+  return (maps[sheetIndex] || {})[key] || null;
 }
