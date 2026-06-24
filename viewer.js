@@ -69,7 +69,6 @@ const MONO_THRESHOLD = 165;
     context.fillRect(0, 0, renderW, renderH);
     context.imageSmoothingEnabled = false;
 
-    wrapper.appendChild(canvas);
     container.appendChild(wrapper);
 
     await page.render({
@@ -201,8 +200,6 @@ function releaseCanvas(canvas) {
 function attachPreviewCanvas(wrapper, hiResCanvas, targetW, targetH) {
   const preview = buildPageBitmap(hiResCanvas);
   preview.className = "pageCanvas";
-  preview.width = targetW;
-  preview.height = targetH;
 
   const pageContent = document.createElement("div");
   pageContent.className = "pageContent";
@@ -427,17 +424,18 @@ function wrapTextLines(context, text, maxWidth) {
 function buildPageBitmap(sourceCanvas) {
   const targetW = THERMAL.widthIn * THERMAL.dpi;
   const targetH = THERMAL.heightIn * THERMAL.dpi;
+  const ctx = sourceCanvas.getContext("2d", { alpha: false });
+
+  toThermalMonochrome(ctx, sourceCanvas.width, sourceCanvas.height);
 
   if (sourceCanvas.width === targetW && sourceCanvas.height === targetH) {
-    const ctx = sourceCanvas.getContext("2d", { alpha: false });
-    toThermalMonochrome(ctx, targetW, targetH);
     return sourceCanvas;
   }
 
-  return downscaleAndBinarize(sourceCanvas, targetW, targetH);
+  return downscaleMonochrome(sourceCanvas, targetW, targetH);
 }
 
-function downscaleAndBinarize(sourceCanvas, targetW, targetH) {
+function downscaleMonochrome(sourceCanvas, targetW, targetH) {
   const sw = sourceCanvas.width;
   const sh = sourceCanvas.height;
   const scaleX = sw / targetW;
@@ -464,13 +462,7 @@ function downscaleAndBinarize(sourceCanvas, targetW, targetH) {
 
       for (let sy = y0; sy < y1 && !black; sy++) {
         for (let sx = x0; sx < x1; sx++) {
-          const idx = (sy * sw + sx) * 4;
-          const luminance =
-            0.2126 * srcData[idx] +
-            0.7152 * srcData[idx + 1] +
-            0.0722 * srcData[idx + 2];
-
-          if (luminance < MONO_THRESHOLD) {
+          if (srcData[(sy * sw + sx) * 4] < 128) {
             black = true;
             break;
           }
