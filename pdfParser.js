@@ -248,31 +248,54 @@ function getHeaderBaselineY(items, sellerSkuLabel) {
   );
 }
 
-function collectSaleItemsByRow(dataItems, sellerSkuX) {
-  const sales = [];
+function rowHasDataColumnValue(row, productColumnRight) {
+  if (productColumnRight == null) return false;
+
+  return row.items.some(item => {
+    const text = item.str.trim();
+    if (!text) return false;
+    if (isTableEndText(text)) return false;
+    if (
+      isMaskableLiveTitle(text) ||
+      isScreenIndicator(text) ||
+      isGenericLiveTitle(text)
+    ) {
+      return false;
+    }
+    return item.transform[4] >= productColumnRight;
+  });
+}
+
+// Anchor on every line-item row (auction OR marketplace), not just rows that
+// have a Seller SKU. A row counts as a line item if it carries a Seller SKU
+// value or any value in the SKU/Qty columns (right of the product column).
+// Continuation lines of a wrapped product title stay in the product column, so
+// they are not treated as new rows.
+function collectLineItemRows(dataItems, sellerSkuX, productColumnRight) {
+  const rows = [];
 
   for (const row of groupTextItemsByRow(dataItems)) {
     const saleItem = getSellerSkuFromRow(row.items, sellerSkuX);
-    if (saleItem) {
-      sales.push(saleItem);
-    }
+    const hasData = rowHasDataColumnValue(row, productColumnRight);
+    if (!saleItem && !hasData) continue;
+
+    rows.push({ y: row.y, saleItem });
   }
 
-  return sales.sort((a, b) => b.transform[5] - a.transform[5]);
+  return rows.sort((a, b) => b.y - a.y);
 }
 
-function computeSaleRowBounds(sortedSales, tableBottomY) {
-  return sortedSales.map((sale, idx) => {
-    const saleY = sale.transform[5];
-    const prevSaleY = idx > 0 ? sortedSales[idx - 1].transform[5] : null;
-    const nextSaleY =
-      idx < sortedSales.length - 1 ? sortedSales[idx + 1].transform[5] : null;
+function computeLineItemRowBounds(sortedRows, tableBottomY) {
+  return sortedRows.map((row, idx) => {
+    const rowY = row.y;
+    const prevY = idx > 0 ? sortedRows[idx - 1].y : null;
+    const nextY = idx < sortedRows.length - 1 ? sortedRows[idx + 1].y : null;
 
-    const upperBound = prevSaleY != null ? (prevSaleY + saleY) / 2 : Infinity;
+    const upperBound = prevY != null ? (prevY + rowY) / 2 : Infinity;
     let lowerBound;
 
-    if (nextSaleY != null) {
-      lowerBound = (saleY + nextSaleY) / 2;
+    if (nextY != null) {
+      lowerBound = (rowY + nextY) / 2;
     } else {
       lowerBound = tableBottomY + ROW_Y_TOLERANCE;
     }
@@ -316,14 +339,23 @@ function buildPackingItemsFromOrderedItems(
 ) {
   if (sellerSkuX == null) return [];
 
-  const sortedSales = collectSaleItemsByRow(dataItems, sellerSkuX);
-  if (sortedSales.length === 0) return [];
+  const lineItemRows = collectLineItemRows(
+    dataItems,
+    sellerSkuX,
+    productColumnRight
+  );
+  if (lineItemRows.length === 0) return [];
 
-  const rowBounds = computeSaleRowBounds(sortedSales, tableBottomY);
+  const rowBounds = computeLineItemRowBounds(lineItemRows, tableBottomY);
   let lastDetectedSheetIndex = null;
   const results = [];
 
-  sortedSales.forEach((saleItem, idx) => {
+  lineItemRows.forEach((row, idx) => {
+    // Marketplace rows have no Seller SKU, so they get no label and are left
+    // untouched. Their row still bounds the neighbouring auction bands above.
+    const saleItem = row.saleItem;
+    if (!saleItem) return;
+
     const { upperBound, lowerBound } = rowBounds[idx];
     const titleItems = collectTitleItemsForSaleBand(
       dataItems,
@@ -399,7 +431,23 @@ function parseTikTokPackingItemsFromRows(rawItems) {
     return results;
   }
 
+  // A Seller SKU column exists but yielded no values: these are marketplace
+  // items (only a plain SKU like a colour/size, no Seller SKU). Ignore them
+  // rather than loose-guessing an unrelated product from another column/sheet.
+  if (hasSkuColumnValues(dataItems, skuX)) {
+    return [];
+  }
+
   return parseLooseNumericRows(rows);
+}
+
+function hasSkuColumnValues(dataItems, skuX) {
+  if (skuX == null) return false;
+  return dataItems.some(item => {
+    const text = item.str.trim();
+    if (!text) return false;
+    return Math.abs(item.transform[4] - skuX) <= SELLER_SKU_X_TOLERANCE;
+  });
 }
 
 function findPackingTableHeaderRow(rows) {
