@@ -16,11 +16,30 @@ const WORKBOOK_STORAGE_KEYS = [
   "workbookFileName",
   "workbookUpdatedAt",
   "workbookWarnings",
-  "workbookItemChecks"
+  "workbookItemChecks",
+  "spreadsheetUrl",
+  "workbookFileData"
 ];
 
+const SHEET_FETCH_TIMEOUT_MS = 15000;
+const MAX_WORKBOOK_FILE_BYTES = 15 * 1024 * 1024;
+const MAX_STORED_WORKBOOK_FILE_BYTES = 4 * 1024 * 1024;
+const MAX_LIVE_TITLE_PATTERNS = 6;
+
+const LIVE_TITLE_PATTERN_KEYS = Array.from(
+  { length: MAX_LIVE_TITLE_PATTERNS },
+  (_, i) => `liveTitlePattern${i + 1}`
+);
+
 function getSheetStorageKeys() {
-  return [...SHEET_URL_KEYS, "sheetUrl", ...WORKBOOK_STORAGE_KEYS];
+  return [
+    SETTINGS_STORAGE_KEY,
+    ...SHEET_URL_KEYS,
+    "sheetUrl",
+    "liveTitlePatterns",
+    ...LIVE_TITLE_PATTERN_KEYS,
+    ...WORKBOOK_STORAGE_KEYS
+  ];
 }
 
 function getStoredSheetUrls(stored) {
@@ -33,9 +52,36 @@ function getStoredSheetUrls(stored) {
 }
 
 function hasWorkbookMaps(stored) {
-  return Boolean(
-    stored?.workbookMaps && Object.keys(stored.workbookMaps).length > 0
-  );
+  return Boolean(sanitizeWorkbookMaps(stored?.workbookMaps));
+}
+
+function sanitizeWorkbookMaps(maps) {
+  if (!maps || typeof maps !== "object" || Array.isArray(maps)) {
+    return null;
+  }
+
+  const sanitized = {};
+
+  for (const [key, map] of Object.entries(maps)) {
+    const liveIndex = Number(key);
+    if (!Number.isFinite(liveIndex) || liveIndex < 1) continue;
+    if (!map || typeof map !== "object" || Array.isArray(map)) continue;
+
+    const cleanMap = {};
+    for (const [saleNumber, productName] of Object.entries(map)) {
+      const sale = normalizeSaleNumber(saleNumber);
+      const product = normalizeProductName(productName);
+      if (sale && product) {
+        cleanMap[sale] = product;
+      }
+    }
+
+    if (Object.keys(cleanMap).length > 0) {
+      sanitized[liveIndex] = cleanMap;
+    }
+  }
+
+  return Object.keys(sanitized).length > 0 ? sanitized : null;
 }
 
 function hasLegacySheetUrls(stored) {
@@ -43,22 +89,137 @@ function hasLegacySheetUrls(stored) {
   return Boolean(urls[0] && urls[1]);
 }
 
+function spreadsheetIdFromUrl(url) {
+  const trimmed = String(url || "").trim();
+  const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  return match && match[1] !== "e" ? match[1] : null;
+}
+
+function spreadsheetExportXlsxUrl(url) {
+  const id = spreadsheetIdFromUrl(url);
+  if (!id) return null;
+  return `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`;
+}
+
+async function fetchSpreadsheetWorkbookBuffer(url) {
+  const exportUrl = spreadsheetExportXlsxUrl(url);
+  if (!exportUrl) {
+    throw new Error("Invalid Google Spreadsheet URL.");
+  }
+
+  const response = await fetchWithTimeout(exportUrl);
+  if (!response.ok) {
+    throw new Error(
+      "Could not download spreadsheet. Share it as 'Anyone with the link can view'."
+    );
+  }
+
+  const buffer = await response.arrayBuffer();
+  if (!buffer || buffer.byteLength === 0) {
+    throw new Error("Spreadsheet download was empty.");
+  }
+
+  if (buffer.byteLength > MAX_WORKBOOK_FILE_BYTES) {
+    throw new Error("Spreadsheet is too large. Try removing unused tabs or rows.");
+  }
+
+  const header = new Uint8Array(buffer.slice(0, 4));
+  if (header[0] === 0x3c) {
+    throw new Error(
+      "Spreadsheet returned a web page, not Excel data. Check the URL and sharing settings."
+    );
+  }
+
+  return buffer;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+
+  return btoa(binary);
+}
+
+function base64ToArrayBuffer(base64) {
+  const binary = atob(String(base64 || ""));
+  const bytes = new Uint8Array(binary.length);
+
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+
+  return bytes.buffer;
+}
+
+function canStoreWorkbookFileData(byteLength) {
+  return byteLength > 0 && byteLength <= MAX_STORED_WORKBOOK_FILE_BYTES;
+}
+
 // ---------------------------------------------------------------------------
 // Sale / product normalization
 // ---------------------------------------------------------------------------
 
+const MAX_AUCTION_SALE_DIGITS = 10;
+
 function normalizeSaleNumber(value) {
   if (value == null || value === "") return "";
 
-  return String(value)
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const asInt = Math.trunc(value);
+    return String(asInt === value ? asInt : value);
+  }
+
+  let text = String(value)
     .replace(/^\ufeff/, "")
     .replace(/\r/g, "")
     .trim()
     .replace(/^["']|["']$/g, "");
+
+  text = text.replace(/^#+/, "");
+  text = text.replace(/^(?:sale|lot|sku)\s*#?\s*/i, "");
+
+  if (/^\d+\.0+$/.test(text)) {
+    text = String(parseInt(text, 10));
+  }
+
+  return text.trim();
+}
+
+function isAuctionSaleNumber(value) {
+  const sale = normalizeSaleNumber(value);
+  if (!sale || !/^\d+$/.test(sale)) return false;
+  return sale.length <= MAX_AUCTION_SALE_DIGITS;
+}
+
+function getSaleLookupCandidates(saleNumber) {
+  const primary = normalizeSaleNumber(saleNumber);
+  const candidates = new Set();
+
+  if (primary) candidates.add(primary);
+
+  const digitsOnly = primary.replace(/\D/g, "");
+  if (digitsOnly) candidates.add(digitsOnly);
+
+  if (/^\d+$/.test(primary)) {
+    candidates.add(String(parseInt(primary, 10)));
+  }
+
+  return [...candidates].filter(Boolean);
 }
 
 function normalizeProductName(value) {
-  if (value == null) return "";
+  if (value == null || value === "") return "";
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const asInt = Math.trunc(value);
+    return String(asInt === value ? asInt : value);
+  }
 
   return String(value)
     .replace(/\r/g, "")
@@ -66,15 +227,171 @@ function normalizeProductName(value) {
     .replace(/^["']|["']$/g, "");
 }
 
-function rowsToSaleMap(rows) {
+function getRowCell(row, index) {
+  if (row == null || index == null || index < 0) return "";
+
+  if (Array.isArray(row)) {
+    const value = row[index];
+    return value == null ? "" : value;
+  }
+
+  if (typeof row === "object") {
+    const value = row[index] ?? row[String(index)];
+    return value == null ? "" : value;
+  }
+
+  return "";
+}
+
+function rowHasAnyCell(row) {
+  if (!row) return false;
+
+  if (Array.isArray(row)) {
+    return row.some(cell => normalizeProductName(cell) !== "");
+  }
+
+  if (typeof row === "object") {
+    return Object.values(row).some(cell => normalizeProductName(cell) !== "");
+  }
+
+  return false;
+}
+
+function getRowMaxIndex(row) {
+  if (!row) return 0;
+
+  if (Array.isArray(row)) {
+    return Math.max(0, row.length - 1);
+  }
+
+  if (typeof row === "object") {
+    const keys = Object.keys(row)
+      .map(key => Number(key))
+      .filter(num => Number.isFinite(num));
+    return keys.length ? Math.max(...keys) : 0;
+  }
+
+  return 0;
+}
+
+function indexToColumnLetter(index) {
+  let n = index + 1;
+  let result = "";
+
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    result = String.fromCharCode(65 + rem) + result;
+    n = Math.floor((n - 1) / 26);
+  }
+
+  return result || "A";
+}
+
+function looksLikeSaleNumber(value) {
+  const sale = normalizeSaleNumber(value);
+  if (!sale) return false;
+  if (/^\d+$/.test(sale)) return true;
+  if (/^sale\s*#?\s*\d+$/i.test(sale)) return true;
+  return /^#?\d[\w-]*$/i.test(sale) && sale.length <= 24;
+}
+
+function looksLikeProductName(value) {
+  const product = normalizeProductName(value);
+  if (!product || product.length < 2) return false;
+  return !/^(sale|product|name|sku|item|description|qty|quantity)$/i.test(product);
+}
+
+function detectWorkbookColumns(rows) {
+  const maxScanRows = Math.min(rows.length, 40);
+  const saleHeader = /sale|lot|sku|item\s*#|order\s*#/i;
+  const productHeader = /product|description|item\s*name|title|name/i;
+
+  for (let headerRow = 0; headerRow < Math.min(6, maxScanRows); headerRow++) {
+    const row = rows[headerRow];
+    if (!rowHasAnyCell(row)) continue;
+
+    const maxCol = getRowMaxIndex(row);
+    let saleCol = -1;
+    let productCol = -1;
+
+    for (let col = 0; col <= maxCol; col++) {
+      const label = normalizeProductName(getRowCell(row, col)).toLowerCase();
+      if (!label) continue;
+      if (saleCol < 0 && saleHeader.test(label)) saleCol = col;
+      if (productCol < 0 && productHeader.test(label) && !/^sale/.test(label)) {
+        productCol = col;
+      }
+    }
+
+    if (saleCol >= 0 && productCol >= 0 && saleCol !== productCol) {
+      return {
+        saleColumn: saleCol,
+        productColumn: productCol,
+        itemCheckColumn: Math.min(productCol + 1, maxCol),
+        headerRows: headerRow + 1
+      };
+    }
+  }
+
+  let best = null;
+  const maxCol = rows
+    .slice(0, maxScanRows)
+    .reduce((highest, row) => Math.max(highest, getRowMaxIndex(row)), 0);
+
+  for (let saleCol = 0; saleCol <= maxCol; saleCol++) {
+    for (let productCol = 0; productCol <= maxCol; productCol++) {
+      if (saleCol === productCol) continue;
+
+      let valid = 0;
+      let headerRows = 1;
+
+      for (let rowIndex = 0; rowIndex < maxScanRows; rowIndex++) {
+        const row = rows[rowIndex];
+        if (!rowHasAnyCell(row)) continue;
+
+        const saleNumber = normalizeSaleNumber(getRowCell(row, saleCol));
+        const productName = normalizeProductName(getRowCell(row, productCol));
+
+        if (!saleNumber || !productName) continue;
+        if (!looksLikeSaleNumber(saleNumber) || !looksLikeProductName(productName)) {
+          continue;
+        }
+        if (productName.length <= saleNumber.length && /^\d+$/.test(saleNumber)) {
+          continue;
+        }
+
+        valid += 1;
+        if (valid === 1) headerRows = rowIndex;
+      }
+
+      if (valid >= 2 && (!best || valid > best.valid)) {
+        best = {
+          saleColumn: saleCol,
+          productColumn: productCol,
+          itemCheckColumn: Math.min(productCol + 1, maxCol),
+          headerRows,
+          valid
+        };
+      }
+    }
+  }
+
+  if (!best) return null;
+
+  const { valid, ...columns } = best;
+  return columns;
+}
+
+function rowsToSaleMap(rows, columnOverride) {
+  const cols = columnOverride || getWorkbookColumnIndices();
   const map = {};
   let skippedRows = 0;
 
-  rows.slice(1).forEach(row => {
-    if (!row || !row.length) return;
+  rows.slice(cols.headerRows).forEach(row => {
+    if (!rowHasAnyCell(row)) return;
 
-    const saleNumber = normalizeSaleNumber(row[0]);
-    const productName = normalizeProductName(row[1]);
+    const saleNumber = normalizeSaleNumber(getRowCell(row, cols.saleColumn));
+    const productName = normalizeProductName(getRowCell(row, cols.productColumn));
 
     if (!saleNumber && !productName) return;
 
@@ -89,27 +406,115 @@ function rowsToSaleMap(rows) {
   return { map, skippedRows };
 }
 
-function countMapRows(maps) {
-  const counts = {};
-  for (const [index, map] of Object.entries(maps || {})) {
-    counts[index] = Object.keys(map).length;
+function mapLooksLikeAccidentalRowNumbers(map) {
+  const keys = Object.keys(map || {})
+    .map(key => normalizeSaleNumber(key))
+    .filter(key => /^\d+$/.test(key))
+    .map(key => parseInt(key, 10))
+    .sort((a, b) => a - b);
+
+  if (keys.length < 2) return false;
+
+  const sequentialFromOne = keys.every((value, index) => value === index + 1);
+  return sequentialFromOne && keys[0] === 1 && keys[keys.length - 1] <= 25;
+}
+
+function scoreSaleMap(map) {
+  const keys = Object.keys(map || {});
+  if (keys.length === 0) return -1;
+
+  let score = keys.length * 10;
+  if (mapLooksLikeAccidentalRowNumbers(map)) score -= 100;
+
+  const numericKeys = keys
+    .map(key => parseInt(normalizeSaleNumber(key), 10))
+    .filter(value => Number.isFinite(value));
+
+  if (numericKeys.length > 0 && Math.max(...numericKeys) > 20) {
+    score += 20;
   }
-  return counts;
+
+  return score;
+}
+
+function formatSaleNumberPreview(map, limit = 4) {
+  const keys = Object.keys(map || {})
+    .map(key => normalizeSaleNumber(key))
+    .filter(Boolean)
+    .sort((a, b) => {
+      const aNum = Number(a);
+      const bNum = Number(b);
+      if (Number.isFinite(aNum) && Number.isFinite(bNum)) {
+        return aNum - bNum;
+      }
+      return String(a).localeCompare(String(b));
+    });
+
+  if (keys.length === 0) return "none";
+  const preview = keys.slice(0, limit).join(", ");
+  return keys.length > limit ? `${preview}, ...` : preview;
+}
+
+function parseTabSaleMap(rows, workbookSettings) {
+  const buildResult = (columnConfig, detectedColumns) => {
+    const parsed = rowsToSaleMap(rows, columnConfig);
+    return {
+      ...parsed,
+      columnConfig,
+      detectedColumns,
+      itemCheckRows: findColumnCheckRows(rows, undefined, columnConfig)
+    };
+  };
+
+  if (workbookSettings.useCustomColumns) {
+    return buildResult(getWorkbookColumnIndices(), null);
+  }
+
+  const defaultConfig = getWorkbookColumnIndices();
+  let best = buildResult(defaultConfig, null);
+  const detected = detectWorkbookColumns(rows);
+
+  if (detected) {
+    const candidate = buildResult(detected, {
+      saleColumn: indexToColumnLetter(detected.saleColumn),
+      productColumn: indexToColumnLetter(detected.productColumn),
+      headerRows: detected.headerRows
+    });
+
+    if (scoreSaleMap(candidate.map) > scoreSaleMap(best.map)) {
+      best = candidate;
+    }
+  }
+
+  if (
+    mapLooksLikeAccidentalRowNumbers(best.map) &&
+    detected &&
+    scoreSaleMap(rowsToSaleMap(rows, detected).map) > scoreSaleMap(best.map)
+  ) {
+    best = buildResult(detected, {
+      saleColumn: indexToColumnLetter(detected.saleColumn),
+      productColumn: indexToColumnLetter(detected.productColumn),
+      headerRows: detected.headerRows
+    });
+  }
+
+  return best;
 }
 
 function hasCellValue(value) {
   return normalizeProductName(value) !== "";
 }
 
-function findColumnCheckRows(rows, columnIndex = 2) {
+function findColumnCheckRows(rows, columnIndex, columnOverride) {
+  const cols = columnOverride || getWorkbookColumnIndices();
+  const index = columnIndex ?? cols.itemCheckColumn;
   const hits = [];
 
   rows.forEach((row, i) => {
-    if (i === 0) return;
+    if (i < cols.headerRows) return;
+    if (!rowHasAnyCell(row)) return;
 
-    if (!row || !row.length) return;
-
-    if (hasCellValue(row[columnIndex])) {
+    if (hasCellValue(getRowCell(row, index))) {
       hits.push(i + 1);
     }
   });
@@ -132,10 +537,11 @@ function formatItemCheckEntry(entry) {
 }
 
 function formatItemCheckBlockMessage(itemChecks) {
+  const column = getEffectiveWorkbookSettings().itemCheckColumn;
   const lines = [
     "Item checks are required before continuing.",
     "",
-    "Clear column C on these rows, then reload your workbook:",
+    `Clear column ${column} on these rows, then reload your workbook:`,
     ""
   ];
 
@@ -144,12 +550,13 @@ function formatItemCheckBlockMessage(itemChecks) {
   });
 
   lines.push("");
-  lines.push("Column C is used for pending item checks.");
+  lines.push(`Column ${column} is used for pending item checks.`);
 
   return lines.join("\n");
 }
 
 function hasPendingItemChecks(stored) {
+  if (!getActiveSettings().itemChecks.enabled) return false;
   return Boolean(stored?.workbookItemChecks?.length);
 }
 
@@ -170,7 +577,9 @@ function liveIndexFromTabName(name, positionIndex) {
 }
 
 function isIgnoredWorkbookTab(tabName) {
-  return /COST/i.test(String(tabName || ""));
+  const pattern = getEffectiveWorkbookSettings().ignoreTabPattern;
+  if (!pattern) return false;
+  return String(tabName || "").toUpperCase().includes(pattern.toUpperCase());
 }
 
 function mergeTabIntoMaps(maps, liveIndex, tabMap, warnings, tabName) {
@@ -201,6 +610,16 @@ function buildWorkbookParseResult(tabReports) {
     if (report.status === "loaded") {
       loadedTabs.push(report);
       mergeTabIntoMaps(maps, report.liveIndex, report.map, warnings, report.tabName);
+      if (report.detectedColumns) {
+        warnings.push(
+          `Tab "${report.tabName}": auto-detected columns ${report.detectedColumns.saleColumn}/${report.detectedColumns.productColumn} (${report.detectedColumns.headerRows} header row(s)).`
+        );
+      }
+      if (report.suspiciousRowNumbers) {
+        warnings.push(
+          `Tab "${report.tabName}": sale numbers look like row numbers (1, 2, 3...). Check that column A is the TikTok Seller SKU, not a row counter.`
+        );
+      }
       if (report.skippedRows > 0) {
         warnings.push(
           `Tab "${report.tabName}": skipped ${report.skippedRows} row(s) missing sale # or product name.`
@@ -236,8 +655,17 @@ function formatWorkbookStatusSummary({
     .map(([index, map]) => `Live ${index}: ${Object.keys(map).length}`)
     .join(" | ");
 
+  const salePreview = Object.entries(maps)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([index, map]) => `Live ${index}: ${formatSaleNumberPreview(map)}`)
+    .join(" | ");
+
   lines.push(`${fileName} - ${liveCount} live tab(s)`);
   if (rowSummary) lines.push(rowSummary);
+  if (salePreview) {
+    lines.push(`Sale #s loaded: ${salePreview}`);
+    lines.push("These must match the Seller SKU numbers on the packing PDF.");
+  }
 
   if (updatedAt) {
     lines.push(`Updated: ${new Date(updatedAt).toLocaleString()}`);
@@ -260,23 +688,26 @@ function getSetupStatus(stored) {
     return {
       mode: "workbook-blocked",
       ready: false,
-      label: "Item checks required in column C"
+      label: `Item checks required in column ${getActiveSettings().workbook.itemCheckColumn}`
     };
   }
 
   if (hasWorkbookMaps(stored)) {
+    const label = stored.spreadsheetUrl
+      ? "Linked Google Spreadsheet"
+      : stored.workbookFileName || "Saved workbook";
     return {
       mode: "workbook",
       ready: true,
-      label: stored.workbookFileName || "Saved workbook"
+      label
     };
   }
 
   if (hasLegacySheetUrls(stored)) {
     return {
-      mode: "legacy-links",
+      mode: "workbook",
       ready: true,
-      label: "Google Sheet links"
+      label: "Saved product data"
     };
   }
 
@@ -288,48 +719,133 @@ function getSetupStatus(stored) {
 }
 
 // ---------------------------------------------------------------------------
-// Live / screen detection (from PDF text)
+// Live title matching (screen keyword — always on)
 // ---------------------------------------------------------------------------
 
-function detectScreenNumber(allText, lastLine) {
-  const liveMatch = allText.match(/LIVE\s*-\s*AS SEEN ON SCREEN\s+(\d+)\b/i);
-  if (liveMatch) return parseInt(liveMatch[1], 10);
+function escapeRegex(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
-  const linePatterns = [/^SCREEN\s*(\d+)$/i, /^ON\s+SCREEN\s*(\d+)$/i];
-  for (const pattern of linePatterns) {
-    const match = lastLine.match(pattern);
-    if (match) return parseInt(match[1], 10);
+function titleContainsScreenKeyword(text) {
+  const keyword = getScreenKeyword();
+  if (!keyword) return false;
+  return new RegExp(`\\b${escapeRegex(keyword)}\\b`, "i").test(String(text || ""));
+}
+
+function detectScreenNumberFromKeyword(allText, lastLine) {
+  const keyword = getScreenKeyword();
+  if (!keyword) return null;
+
+  const escaped = escapeRegex(keyword);
+  const numberedRegex = new RegExp(`${escaped}\\s+(\\d+)\\b`, "gi");
+  let numberedMatch;
+  let lastNumber = null;
+
+  while ((numberedMatch = numberedRegex.exec(allText)) !== null) {
+    lastNumber = parseInt(numberedMatch[1], 10);
   }
 
-  if (
-    /\bSCREEN\s+(\d+)\b/i.test(allText) &&
-    /\b(LIVE|AS\s+SEEN\s+ON)\b/i.test(allText)
-  ) {
-    const match = allText.match(/\bSCREEN\s+(\d+)\b/i);
-    if (match) return parseInt(match[1], 10);
+  if (lastNumber != null) return lastNumber;
+
+  const trimmedLine = normalizeTitleFragment(lastLine);
+  if (trimmedLine) {
+    const linePatterns = [
+      new RegExp(`^${escaped}\\s*(\\d+)?$`, "i"),
+      new RegExp(`^ON\\s+${escaped}\\s*(\\d+)?$`, "i")
+    ];
+
+    for (const pattern of linePatterns) {
+      const match = trimmedLine.match(pattern);
+      if (match) return match[1] ? parseInt(match[1], 10) : 1;
+    }
+  }
+
+  if (titleContainsScreenKeyword(allText)) {
+    return 1;
   }
 
   return null;
 }
 
-function getLiveSheetIndex(liveTitle, productLines) {
+function normalizeLiveSearchText(liveTitle, productLines) {
   const lines = (productLines || []).map(line =>
-    line.replace(/\s+/g, " ").trim()
+    String(line).replace(/\s+/g, " ").trim()
   );
-  const allText = [liveTitle, ...lines]
+
+  return [liveTitle, ...lines]
     .filter(Boolean)
     .join(" ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function getLiveSheetIndex(liveTitle, productLines) {
+  const lines = (productLines || []).map(line =>
+    String(line).replace(/\s+/g, " ").trim()
+  );
+  const allText = normalizeLiveSearchText(liveTitle, lines);
   const lastLine = lines[lines.length - 1] || "";
 
-  const screenNumber = detectScreenNumber(allText, lastLine);
+  const screenNumber = detectScreenNumberFromKeyword(allText, lastLine);
   if (screenNumber != null) return screenNumber;
 
-  if (/LIVE\s*-\s*AS SEEN ON SCREEN\b/i.test(allText)) return 1;
-  if (/LIVE\s*-\s*AS SEEN\b/i.test(allText)) return 1;
+  if (isStrictLiveMatchingEnabled()) {
+    return null;
+  }
+
+  const trailingNumber = allText.match(/\b(\d+)\s*$/);
+  if (trailingNumber) return parseInt(trailingNumber[1], 10);
 
   return 1;
+}
+
+function rowTitleMatchesScreenKeyword(titleText, titleLines) {
+  if (titleContainsScreenKeyword(titleText)) return true;
+
+  return (titleLines || []).some(line => {
+    const value = normalizeTitleFragment(line);
+    return titleContainsScreenKeyword(value) || isScreenKeywordIndicator(value);
+  });
+}
+
+function normalizeTitleFragment(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function isLiveTitleText(text) {
+  const value = normalizeTitleFragment(text);
+  if (!value) return false;
+  return /LIVE\s*-/i.test(value) || titleContainsScreenKeyword(value);
+}
+
+function isMaskableLiveTitleText(text) {
+  const value = normalizeTitleFragment(text);
+  if (!value) return false;
+
+  if (isScreenKeywordIndicator(value)) return false;
+
+  return /LIVE\s*-/i.test(value) || titleContainsScreenKeyword(value);
+}
+
+function isScreenKeywordIndicator(text) {
+  const keyword = getScreenKeyword();
+  if (!keyword) return false;
+
+  const value = normalizeTitleFragment(text);
+  const escaped = escapeRegex(keyword);
+
+  return (
+    new RegExp(`^${escaped}\\s*\\d*$`, "i").test(value) ||
+    new RegExp(`^ON\\s+${escaped}\\s*\\d*$`, "i").test(value)
+  );
+}
+
+function isLegacyScreenIndicator(text) {
+  return isScreenKeywordIndicator(text);
+}
+
+function getPageDefaultLiveIndex(pageText) {
+  return getLiveSheetIndex(pageText, []);
 }
 
 // ---------------------------------------------------------------------------
@@ -407,28 +923,49 @@ function csvTextToSaleMap(csv) {
   return rowsToSaleMap(csvTextToRows(csv)).map;
 }
 
+async function fetchWithTimeout(url, timeoutMs = SHEET_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function fetchSheetCsv(url) {
   if (!url) return null;
 
   const csvUrl = normalizeSheetUrl(url);
-  const response = await fetch(csvUrl);
 
-  if (!response.ok) {
-    console.warn("[TikTokPacker] Sheet fetch failed:", csvUrl, response.status);
+  try {
+    const response = await fetchWithTimeout(csvUrl);
+
+    if (!response.ok) {
+      console.warn("[TikTokPacker] Sheet fetch failed:", csvUrl, response.status);
+      return null;
+    }
+
+    const csv = await response.text();
+
+    if (csv.trimStart().startsWith("<")) {
+      console.warn(
+        "[TikTokPacker] Sheet URL returned HTML, not CSV. Use a published CSV link or shareable sheet URL:",
+        csvUrl
+      );
+      return null;
+    }
+
+    return csv;
+  } catch (err) {
+    const reason =
+      err?.name === "AbortError"
+        ? "timed out"
+        : String(err?.message || err);
+    console.warn("[TikTokPacker] Sheet fetch error:", csvUrl, reason);
     return null;
   }
-
-  const csv = await response.text();
-
-  if (csv.trimStart().startsWith("<")) {
-    console.warn(
-      "[TikTokPacker] Sheet URL returned HTML, not CSV. Use a published CSV link or shareable sheet URL:",
-      csvUrl
-    );
-    return null;
-  }
-
-  return csv;
 }
 
 async function scanLegacyUrlsForItemChecks(urls) {
@@ -442,7 +979,7 @@ async function scanLegacyUrlsForItemChecks(urls) {
     if (!csv) continue;
 
     const rows = csvTextToRows(csv);
-    const itemCheckRows = findColumnCheckRows(rows, 2);
+    const itemCheckRows = findColumnCheckRows(rows);
 
     if (itemCheckRows.length > 0) {
       checks.push({
@@ -484,17 +1021,10 @@ async function loadSheetMapsFromUrls(sheetUrls) {
   );
 
   const maps = {};
-  const logCounts = {};
 
   results.forEach((map, i) => {
-    const index = i + 1;
-    maps[index] = map;
-    if (i < 2 || paddedUrls[i]) {
-      logCounts[`live${index}`] = Object.keys(map).length;
-    }
+    maps[i + 1] = map;
   });
-
-  console.log("[TikTokPacker] Sheet rows loaded:", logCounts);
 
   if (
     Object.keys(maps[1] || {}).length === 0 &&
@@ -513,11 +1043,46 @@ async function loadSheetMapsFromUrls(sheetUrls) {
 // ---------------------------------------------------------------------------
 
 function lookupProduct(maps, sheetIndex, saleNumber) {
-  const key = normalizeSaleNumber(saleNumber);
-  return (maps[sheetIndex] || {})[key] || null;
+  return resolveProductLookup(maps, sheetIndex, saleNumber).productName;
+}
+
+function resolveProductLookup(maps, sheetIndex, saleNumber) {
+  const candidates = getSaleLookupCandidates(saleNumber);
+  const resolvedIndex = Number.isFinite(sheetIndex) && sheetIndex >= 1 ? sheetIndex : null;
+
+  if (resolvedIndex == null) {
+    return { productName: null, sheetIndex: null };
+  }
+
+  for (const key of candidates) {
+    const productName = (maps[resolvedIndex] || {})[key] || null;
+    if (productName) {
+      return { productName, sheetIndex: resolvedIndex };
+    }
+  }
+
+  if (isStrictLiveMatchingEnabled()) {
+    return { productName: null, sheetIndex: resolvedIndex };
+  }
+
+  const entries = Object.entries(maps || {}).sort(
+    ([a], [b]) => Number(a) - Number(b)
+  );
+
+  for (const key of candidates) {
+    for (const [index, map] of entries) {
+      if (map[key]) {
+        return { productName: map[key], sheetIndex: Number(index) };
+      }
+    }
+  }
+
+  return { productName: null, sheetIndex: resolvedIndex };
 }
 
 async function getPendingItemChecks(stored) {
+  if (!getActiveSettings().itemChecks.enabled) return [];
+
   const data =
     stored || (await chrome.storage.local.get(getSheetStorageKeys()));
 
@@ -534,6 +1099,8 @@ async function getPendingItemChecks(stored) {
 }
 
 async function assertNoPendingItemChecks(stored) {
+  if (!getActiveSettings().itemChecks.blockPacking) return;
+
   const itemChecks = await getPendingItemChecks(stored);
   if (itemChecks.length > 0) {
     const err = new Error("ITEM_CHECKS_REQUIRED");
@@ -546,13 +1113,9 @@ async function resolveSheetMaps(stored) {
   const data =
     stored || (await chrome.storage.local.get(getSheetStorageKeys()));
 
-  if (hasWorkbookMaps(data)) {
-    console.log(
-      "[TikTokPacker] Using workbook",
-      data.workbookFileName || "(saved)",
-      countMapRows(data.workbookMaps)
-    );
-    return data.workbookMaps;
+  const workbookMaps = sanitizeWorkbookMaps(data.workbookMaps);
+  if (workbookMaps) {
+    return workbookMaps;
   }
 
   const urls = getStoredSheetUrls(data);
@@ -563,13 +1126,33 @@ async function resolveSheetMaps(stored) {
   return loadSheetMapsFromUrls(urls);
 }
 
+async function storageSet(values) {
+  try {
+    await chrome.storage.local.set(values);
+  } catch (err) {
+    const message = String(err?.message || err);
+    if (/quota/i.test(message)) {
+      throw new Error("STORAGE_QUOTA_EXCEEDED");
+    }
+    throw err;
+  }
+}
+
+function getStorageQuotaMessage() {
+  return [
+    "Chrome storage is full.",
+    "",
+    "Clear the saved workbook or remove unused extension data, then try again."
+  ].join("\n");
+}
+
 function getMissingSetupMessage() {
   return [
     "No product data is loaded.",
     "",
     "Open the extension popup and either:",
-    "1. Upload your Excel workbook (.xlsx), or",
-    "2. Save Live 1 and Live 2 Google Sheet links (legacy fallback).",
+    "1. Link a Google Spreadsheet, or",
+    "2. Upload an Excel workbook (.xlsx).",
     "",
     "Workbook format: each tab = one live, column A = sale #, column B = product name."
   ].join("\n");

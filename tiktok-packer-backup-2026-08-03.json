@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "exportedAt": "2026-08-03T12:21:43.486Z",
+  "extensionSettings": {
+    "liveTitle": {
+      "screenKeyword": "FRAGRANCES"
+    },
+    "workbook": {
+      "useCustomColumns": false,
+      "saleColumn": "A",
+      "productColumn": "B",
+      "itemCheckColumn": "C",
+      "headerRows": 1,
+      "ignoreTabPattern": "COST"
+    },
+    "overlay": {
+      "showLivePrefix": true,
+      "livePrefixFormat": "S{n}:",
+      "noMatchText": "NO MATCH FOUND"
+    },
+    "printer": {
+      "useCustom": true,
+      "widthIn": 4,
+      "heightIn": 6,
+      "dpi": 203,
+      "renderScale": 2,
+      "monoThreshold": 165,
+      "printHint": "TSC: 4x6 label, scale 100%, no fit-to-page"
+    },
+    "pdf": {
+      "useCustom": false,
+      "rowYTolerance": 6,
+      "sellerSkuXTolerance": 40,
+      "legacyTitleHint": "AS SEEN ON SCREEN"
+    },
+    "redirect": {
+      "enabled": true,
+      "hostPattern": "tiktok",
+      "extraUrlContains": "oec_fulfillment_doc",
+      "interceptLocalPdfs": true
+    },
+    "itemChecks": {
+      "enabled": true,
+      "blockPacking": true
+    },
+    "lookup": {
+      "strictLiveMatching": true
+    },
+    "debug": false
+  },
+  "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/1d57ydXIltBSysA9a24UczDS1RxTxK3ekX8K7jAm83_s/edit?gid=0#gid=0",
+  "workbookFileName": "Google Spreadsheet",
+  "workbookFileData": "",
+  "workbookMaps": {
+    "1": {
+      "810": "yes",
+      "840": "FAIRY WPES LEMON",
+      "848": "FAIRY WIPES LILY",
+      "859": "FAIRY WIPE LAVENDER",
+      "872": "FAIRY WIPE OG"
+    },
+    "2": {
+      "55": "RIBBED THROW CREAM"
+    }
+  },
+  "workbookUpdatedAt": 1785759678263
+}

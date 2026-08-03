@@ -1,50 +1,185 @@
-// viewer.js - TSC thermal printers (203 DPI, 4x6 labels)
+// viewer.js - TSC thermal printers (configurable label size / DPI)
 
-const THERMAL = {
-  widthIn: 4,
-  heightIn: 6,
-  dpi: 203
-};
+let textLayerObserver = null;
 
-const RENDER_SCALE = 2;
-const MONO_THRESHOLD = 165;
+function createMatchStats() {
+  return { matched: 0, unmatched: [] };
+}
+
+function shouldCountPackingItem(item, overlay) {
+  if (!item?.saleNumber || !isAuctionSaleNumber(item.saleNumber)) {
+    return false;
+  }
+
+  if (!overlay?.bounds?.overlayColumn) {
+    return false;
+  }
+
+  if (isStrictLiveMatchingEnabled()) {
+    return Number.isFinite(item.sheetIndex) && item.sheetIndex >= 1;
+  }
+
+  return true;
+}
+
+function getPrinterSettings() {
+  return getEffectivePrinterSettings();
+}
+
+function getRenderScale() {
+  return getPrinterSettings().renderScale;
+}
+
+function getMonoThreshold() {
+  return getPrinterSettings().monoThreshold;
+}
+
+function getLabelWidthPx() {
+  const printer = getPrinterSettings();
+  return printer.widthIn * printer.dpi;
+}
+
+function getLabelHeightPx() {
+  const printer = getPrinterSettings();
+  return printer.heightIn * printer.dpi;
+}
 
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
 
 (async function initViewer() {
-  try {
-    const pdfUrl = getPdfUrlFromQuery();
-    const maps = await loadProductMaps();
-    configurePdfWorker();
-    const pdf = await loadPdfDocument(pdfUrl);
+  let pdf = null;
 
-    await renderAllPages(pdf, maps);
-    pdf.destroy();
+  try {
+    setViewerLoading(true);
+    hideViewerError();
+
+    if (typeof pdfjsLib === "undefined") {
+      throw new Error("PDF_LIBRARY_MISSING");
+    }
+
+    const pdfUrl = getPdfUrlFromQuery();
+    const { maps, stored, refreshMeta } = await loadProductMaps();
+    updateToolbarMeta(stored, refreshMeta);
+    configurePdfWorker();
+    pdf = await loadPdfDocument(pdfUrl);
+
+    const matchStats = createMatchStats();
+    const renderedPages = await renderAllPages(pdf, maps, matchStats);
+    if (renderedPages === 0) {
+      throw new Error("NO_PAGES_RENDERED");
+    }
+
+    showMatchSummary(matchStats);
+
     wirePrintButton();
+    enablePrintButton();
   } catch (err) {
     console.error("[TikTokPacker]", err);
     showViewerError(formatViewerError(err));
+  } finally {
+    if (pdf) {
+      try {
+        pdf.destroy();
+      } catch (destroyErr) {
+        console.warn("[TikTokPacker] PDF cleanup failed:", destroyErr);
+      }
+    }
+    setViewerLoading(false);
   }
 })();
 
 function getPdfUrlFromQuery() {
-  const pdfUrl = new URLSearchParams(window.location.search).get("pdf");
-  if (!pdfUrl) {
+  const raw = new URLSearchParams(window.location.search).get("pdf");
+  if (!raw) {
     throw new Error("NO_PDF_URL");
   }
+
+  let pdfUrl;
+  try {
+    pdfUrl = decodeURIComponent(raw);
+  } catch {
+    pdfUrl = raw;
+  }
+
+  if (
+    !pdfUrl.startsWith("http://") &&
+    !pdfUrl.startsWith("https://") &&
+    !pdfUrl.startsWith("file://") &&
+    !pdfUrl.startsWith("blob:")
+  ) {
+    throw new Error("INVALID_PDF_URL");
+  }
+
   return pdfUrl;
 }
 
 async function loadProductMaps() {
-  const stored = await chrome.storage.local.get(getSheetStorageKeys());
+  let stored = await chrome.storage.local.get(getSheetStorageKeys());
+  loadSettings(stored);
+  applyViewerSettings();
+
+  let refreshMeta = { refreshed: false, fromCache: false };
+
+  if (stored.spreadsheetUrl || stored.workbookFileData) {
+    setViewerLoading(true, "Refreshing product data...");
+    const refreshResult = await refreshWorkbookFromSource(stored);
+    if (refreshResult) {
+      refreshMeta = refreshResult;
+      stored = await chrome.storage.local.get(getSheetStorageKeys());
+    }
+  }
+
   await assertNoPendingItemChecks(stored);
   const maps = await resolveSheetMaps(stored);
   if (!maps) {
     throw new Error("NO_PRODUCT_DATA");
   }
-  return maps;
+
+  return { maps, stored, refreshMeta };
+}
+
+function updateToolbarMeta(stored, refreshMeta) {
+  const el = document.getElementById("dataFreshness");
+  if (!el) return;
+
+  el.textContent = formatDataFreshnessText(stored, refreshMeta);
+  el.classList.toggle("is-stale", Boolean(refreshMeta.fromCache && refreshMeta.error));
+}
+
+function showMatchSummary(stats) {
+  const banner = document.getElementById("matchSummary");
+  if (!banner) return;
+
+  const total = stats.matched + stats.unmatched.length;
+  if (total === 0) {
+    banner.hidden = true;
+    return;
+  }
+
+  const lines = [`${stats.matched} matched · ${stats.unmatched.length} no match`];
+
+  if (stats.unmatched.length > 0) {
+    const seen = new Set();
+    const saleList = stats.unmatched
+      .filter(entry => {
+        const key = `${entry.page}:${entry.saleNumber}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map(entry => {
+        const live = entry.sheetIndex ? ` (Live ${entry.sheetIndex})` : "";
+        return `#${entry.saleNumber}${live}`;
+      })
+      .join(", ");
+    lines.push(`Missing sale numbers: ${saleList}`);
+  }
+
+  banner.textContent = lines.join("\n");
+  banner.hidden = false;
+  banner.classList.toggle("has-errors", stats.unmatched.length > 0);
 }
 
 function configurePdfWorker() {
@@ -52,15 +187,70 @@ function configurePdfWorker() {
     chrome.runtime.getURL("pdfjs/pdf.worker.min.js");
 }
 
+function applyViewerSettings() {
+  const printer = getPrinterSettings();
+  const root = document.documentElement;
+
+  root.style.setProperty("--label-width", `${printer.widthIn}in`);
+  root.style.setProperty("--label-height", `${printer.heightIn}in`);
+
+  const hint = document.querySelector(".printHint");
+  if (hint) hint.textContent = printer.printHint;
+}
+
 function wirePrintButton() {
-  document.getElementById("printBtn").addEventListener("click", () => {
+  const printBtn = document.getElementById("printBtn");
+  if (!printBtn || printBtn.dataset.wired === "1") return;
+  printBtn.dataset.wired = "1";
+  printBtn.addEventListener("click", () => {
     setTimeout(() => window.print(), 80);
   });
+}
+
+function enablePrintButton() {
+  const printBtn = document.getElementById("printBtn");
+  if (printBtn) printBtn.disabled = false;
+}
+
+function setViewerLoading(isLoading, message) {
+  const banner = document.getElementById("loadingBanner");
+  if (!banner) return;
+  banner.hidden = !isLoading;
+  if (message) {
+    banner.textContent = message;
+  } else if (!isLoading) {
+    banner.textContent = "Loading packing list...";
+  }
+}
+
+function hideViewerError() {
+  const banner = document.getElementById("errorBanner");
+  if (banner) banner.hidden = true;
 }
 
 function formatViewerError(err) {
   if (err?.message === "NO_PDF_URL") {
     return "No PDF URL was provided to the viewer.";
+  }
+
+  if (err?.message === "INVALID_PDF_URL") {
+    return "The PDF URL in the viewer link is not valid. Try reopening the packing list from TikTok Seller Center.";
+  }
+
+  if (err?.message === "PDF_LIBRARY_MISSING") {
+    return "The PDF viewer failed to load. Reload the extension in chrome://extensions and try again.";
+  }
+
+  if (err?.message === "NO_PAGES_RENDERED") {
+    return [
+      "Could not render any pages from this PDF.",
+      "",
+      "The file may be corrupted, password-protected, or not a supported packing list."
+    ].join("\n");
+  }
+
+  if (err?.message === "PDF_EMPTY") {
+    return "The PDF file is empty or could not be read.";
   }
 
   if (err?.message === "NO_PRODUCT_DATA") {
@@ -79,6 +269,14 @@ function formatViewerError(err) {
       "Allow access to file URLs",
       "",
       "Then reopen the PDF."
+    ].join("\n");
+  }
+
+  if (err?.message?.startsWith("Failed to load PDF")) {
+    return [
+      err.message,
+      "",
+      "The link may have expired. Reopen the packing list from TikTok Seller Center and try again."
     ].join("\n");
   }
 
@@ -116,54 +314,94 @@ function showViewerError(message) {
 // ---------------------------------------------------------------------------
 
 async function loadPdfDocument(url) {
-  if (url.startsWith("file://")) {
-    try {
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`Failed to read local PDF (${response.status})`);
-      }
-      const data = await response.arrayBuffer();
-      return pdfjsLib.getDocument({ data }).promise;
-    } catch (err) {
-      if (String(err).includes("Failed to fetch")) {
-        throw new Error("LOCAL_FILE_BLOCKED");
-      }
-      throw err;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to load PDF (${response.status})`);
     }
-  }
 
-  return pdfjsLib.getDocument(url).promise;
+    const data = await response.arrayBuffer();
+    if (!data.byteLength) {
+      throw new Error("PDF_EMPTY");
+    }
+
+    return pdfjsLib.getDocument({ data }).promise;
+  } catch (err) {
+    if (url.startsWith("file://") && String(err).includes("Failed to fetch")) {
+      throw new Error("LOCAL_FILE_BLOCKED");
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Page rendering
 // ---------------------------------------------------------------------------
 
-async function renderAllPages(pdf, maps) {
+async function renderAllPages(pdf, maps, matchStats) {
   const container = document.getElementById("pdfContainer");
-  const targetW = THERMAL.widthIn * THERMAL.dpi;
-  const targetH = THERMAL.heightIn * THERMAL.dpi;
-  const renderW = targetW * RENDER_SCALE;
-  const renderH = targetH * RENDER_SCALE;
+  if (!container) {
+    throw new Error("Viewer container is missing.");
+  }
+
+  container.replaceChildren();
+
+  const targetW = getLabelWidthPx();
+  const targetH = getLabelHeightPx();
+  const renderW = targetW * getRenderScale();
+  const renderH = targetH * getRenderScale();
+  let renderedPages = 0;
 
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-    await renderPage({
-      pdf,
-      pageNum,
-      maps,
-      container,
-      targetW,
-      targetH,
-      renderW,
-      renderH
-    });
+    try {
+      await renderPage({
+        pdf,
+        pageNum,
+        maps,
+        matchStats,
+        container,
+        targetW,
+        targetH,
+        renderW,
+        renderH
+      });
+      renderedPages += 1;
+    } catch (err) {
+      console.error(`[TikTokPacker] Page ${pageNum} failed:`, err);
+      appendPageError(container, pageNum, err);
+    }
   }
+
+  setupTextLayerObserver(container);
+  return renderedPages;
+}
+
+function appendPageError(container, pageNum, err) {
+  const box = document.createElement("div");
+  box.className = "pageError";
+  box.textContent = `Page ${pageNum} could not be rendered.\n${String(err?.message || err)}`;
+  container.appendChild(box);
+}
+
+function setupTextLayerObserver(container) {
+  if (textLayerObserver) {
+    textLayerObserver.disconnect();
+    textLayerObserver = null;
+  }
+
+  if (typeof ResizeObserver === "undefined") return;
+
+  textLayerObserver = new ResizeObserver(() => {
+    container.querySelectorAll(".pageContent").forEach(syncTextLayerScale);
+  });
+  textLayerObserver.observe(container);
 }
 
 async function renderPage({
   pdf,
   pageNum,
   maps,
+  matchStats,
   container,
   targetW,
   targetH,
@@ -171,57 +409,94 @@ async function renderPage({
   renderH
 }) {
   const page = await pdf.getPage(pageNum);
-  const baseViewport = page.getViewport({ scale: 1 });
-  const scale = renderW / baseViewport.width;
-  const viewport = page.getViewport({ scale });
 
-  const wrapper = document.createElement("div");
-  wrapper.className = "pageWrapper";
-  container.appendChild(wrapper);
+  try {
+    const baseViewport = page.getViewport({ scale: 1 });
+    const scale = renderW / baseViewport.width;
+    const viewport = page.getViewport({ scale });
 
-  const canvas = createRenderCanvas(renderW, renderH);
-  const context = canvas.getContext("2d", {
-    alpha: false,
-    willReadFrequently: true
-  });
+    const wrapper = document.createElement("div");
+    wrapper.className = "pageWrapper";
+    container.appendChild(wrapper);
 
-  await page.render({
-    canvasContext: context,
-    viewport,
-    intent: "print"
-  }).promise;
+    const canvas = createRenderCanvas(renderW, renderH);
+    const context = canvas.getContext("2d", {
+      alpha: false,
+      willReadFrequently: true
+    });
 
-  const textContent = await page.getTextContent();
-  const columnLayout = getTableColumnLayout(textContent);
-  const searchOverlays = [];
+    await page.render({
+      canvasContext: context,
+      viewport,
+      intent: "print"
+    }).promise;
 
-  maskCoverableLiveTitles(context, textContent, viewport, columnLayout);
+    const textContent = await page.getTextContent();
+    const columnLayout = getTableColumnLayout(textContent);
+    const searchOverlays = [];
 
-  const packingItems = parseTikTokPackingItems(textContent);
-  for (const item of packingItems) {
-    const overlay = buildLineItemOverlay(item, maps, viewport, columnLayout, pageNum);
-    if (overlay) {
-      drawLineItemOverlay(context, overlay.bounds, overlay.productName, overlay.sheetIndex);
-      searchOverlays.push({
-        text: overlay.searchText,
-        bounds: overlay.bounds
-      });
+    maskCoverableLiveTitles(context, textContent, viewport, columnLayout);
+
+    const packingItems = parseTikTokPackingItems(textContent);
+    let pageHasUnmatched = false;
+
+    for (const item of packingItems) {
+      if (!isAuctionSaleNumber(item.saleNumber)) {
+        continue;
+      }
+
+      const overlay = buildLineItemOverlay(item, maps, viewport, columnLayout, pageNum);
+      if (overlay) {
+        const countInStats = shouldCountPackingItem(item, overlay);
+
+        if (countInStats) {
+          if (overlay.productName) {
+            matchStats.matched += 1;
+          } else {
+            pageHasUnmatched = true;
+            matchStats.unmatched.push({
+              saleNumber: item.saleNumber,
+              sheetIndex: overlay.sheetIndex,
+              page: pageNum
+            });
+          }
+        }
+
+        drawLineItemOverlay(
+          context,
+          overlay.bounds,
+          overlay.productName,
+          overlay.sheetIndex
+        );
+        searchOverlays.push({
+          text: overlay.searchText,
+          bounds: overlay.bounds
+        });
+      }
+    }
+
+    if (pageHasUnmatched) {
+      wrapper.classList.add("pageWrapper--unmatched");
+    }
+
+    maskSkuColumnHeader(context, textContent, viewport, columnLayout);
+
+    const pageContent = attachPreviewCanvas(wrapper, canvas, targetW, targetH);
+    attachSearchTextLayer(
+      pageContent,
+      textContent,
+      viewport,
+      searchOverlays,
+      targetW,
+      targetH
+    );
+  } finally {
+    try {
+      page.cleanup();
+    } catch (cleanupErr) {
+      console.warn("[TikTokPacker] Page cleanup failed:", cleanupErr);
     }
   }
-
-  maskSkuColumnHeader(context, textContent, viewport, columnLayout);
-
-  const pageContent = attachPreviewCanvas(wrapper, canvas, targetW, targetH);
-  attachSearchTextLayer(
-    pageContent,
-    textContent,
-    viewport,
-    searchOverlays,
-    targetW,
-    targetH
-  );
-
-  page.cleanup();
 }
 
 function createRenderCanvas(width, height) {
@@ -259,22 +534,27 @@ function buildLineItemOverlay(item, maps, viewport, columnLayout, pageNum) {
     viewport,
     columnLayout
   );
-  const productName = lookupProduct(maps, sheetIndex, saleNumber);
+  const lookup = resolveProductLookup(maps, sheetIndex, saleNumber);
+  const productName = lookup.productName;
+  const resolvedSheetIndex = lookup.sheetIndex;
 
-  console.log("[TikTokPacker]", {
-    page: pageNum,
-    saleNumber,
-    sheetIndex,
-    detectedTitle: liveTitle,
-    lookedUpProduct: productName
-  });
+  if (isDebugEnabled()) {
+    console.log("[TikTokPacker]", {
+      page: pageNum,
+      saleNumber,
+      sheetIndex: resolvedSheetIndex,
+      detectedTitle: liveTitle,
+      lookedUpProduct: productName
+    });
+  }
 
-  const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
   return {
     bounds,
     productName,
-    sheetIndex,
-    searchText: productName ? `${sheetTag}${productName}` : `${sheetTag}no match`
+    sheetIndex: resolvedSheetIndex,
+    searchText: productName
+      ? formatMatchedProductLabel(resolvedSheetIndex, productName)
+      : formatNoMatchLabel(resolvedSheetIndex)
   };
 }
 
@@ -345,6 +625,21 @@ function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
 
   if (overlayWidth <= 0 || overlayHeight <= 0) return;
 
+  if (!productName) {
+    context.save();
+    context.fillStyle = "rgba(254, 202, 202, 0.55)";
+    context.fillRect(overlayLeft, overlayTop, overlayWidth, overlayHeight);
+    context.strokeStyle = "#ef4444";
+    context.lineWidth = 2;
+    context.strokeRect(
+      overlayLeft + 1,
+      overlayTop + 1,
+      Math.max(overlayWidth - 2, 0),
+      Math.max(overlayHeight - 2, 0)
+    );
+    context.restore();
+  }
+
   context.fillStyle = "#ffffff";
 
   const skuFillLeft = Math.max(productRight, overlayLeft);
@@ -363,10 +658,9 @@ function drawLineItemOverlay(context, bounds, productName, sheetIndex) {
     context.fillRect(overlayLeft, overlayTop, productFillWidth, productFillHeight);
   }
 
-  const sheetTag = sheetIndex ? `S${sheetIndex}: ` : "";
   const overlayText = productName
-    ? `${sheetTag}${productName}`
-    : `${sheetTag}no match`;
+    ? formatMatchedProductLabel(sheetIndex, productName)
+    : formatNoMatchLabel(sheetIndex);
 
   const padX = 2;
   const padY = 1;
@@ -523,11 +817,6 @@ function attachSearchTextLayer(
 
   pageContent.appendChild(textLayer);
   syncTextLayerScale(pageContent);
-
-  if (typeof ResizeObserver !== "undefined") {
-    const observer = new ResizeObserver(() => syncTextLayerScale(pageContent));
-    observer.observe(pageContent);
-  }
 }
 
 function syncTextLayerScale(pageContent) {
@@ -573,8 +862,8 @@ function wrapTextLines(context, text, maxWidth) {
 // ---------------------------------------------------------------------------
 
 function buildPageBitmap(sourceCanvas) {
-  const targetW = THERMAL.widthIn * THERMAL.dpi;
-  const targetH = THERMAL.heightIn * THERMAL.dpi;
+  const targetW = getLabelWidthPx();
+  const targetH = getLabelHeightPx();
   const ctx = sourceCanvas.getContext("2d", {
     alpha: false,
     willReadFrequently: true
@@ -645,7 +934,7 @@ function toThermalMonochrome(context, width, height) {
       0.2126 * data[i] +
       0.7152 * data[i + 1] +
       0.0722 * data[i + 2];
-    const value = luminance < MONO_THRESHOLD ? 0 : 255;
+    const value = luminance < getMonoThreshold() ? 0 : 255;
 
     data[i] = value;
     data[i + 1] = value;

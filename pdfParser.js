@@ -1,7 +1,12 @@
 // pdfParser.js - TikTok Shop packing list parsing
 
-const ROW_Y_TOLERANCE = 6;
-const SELLER_SKU_X_TOLERANCE = 40;
+function getRowYTolerance() {
+  return getEffectivePdfSettings().rowYTolerance;
+}
+
+function getSellerSkuXTolerance() {
+  return getEffectivePdfSettings().sellerSkuXTolerance;
+}
 
 // ---------------------------------------------------------------------------
 // Row / text helpers
@@ -11,21 +16,25 @@ function normalizePdfText(text) {
   return String(text || "").replace(/\s+/g, " ").trim();
 }
 
-function groupTextItemsByRow(items, tolerance = ROW_Y_TOLERANCE) {
+function groupTextItemsByRow(items, tolerance) {
+  const rowTolerance = tolerance ?? getRowYTolerance();
+  const validItems = items.filter(item => item.str?.trim());
+  if (validItems.length === 0) return [];
+
+  const sorted = [...validItems].sort((a, b) => b.transform[5] - a.transform[5]);
   const rows = [];
+  let current = null;
 
-  for (const item of items) {
-    if (!item.str || !item.str.trim()) continue;
-
+  for (const item of sorted) {
     const y = item.transform[5];
-    let row = rows.find(r => Math.abs(r.y - y) <= tolerance);
 
-    if (!row) {
-      row = { y, items: [] };
-      rows.push(row);
+    if (!current || Math.abs(current.y - y) > tolerance) {
+      current = { y, items: [item] };
+      rows.push(current);
+    } else {
+      current.items.push(item);
+      current.y = (current.y * (current.items.length - 1) + y) / current.items.length;
     }
-
-    row.items.push(item);
   }
 
   for (const row of rows) {
@@ -33,7 +42,6 @@ function groupTextItemsByRow(items, tolerance = ROW_Y_TOLERANCE) {
     row.text = row.items.map(i => i.str).join(" ");
   }
 
-  rows.sort((a, b) => b.y - a.y);
   return rows;
 }
 
@@ -48,7 +56,7 @@ function groupProductLines(sortedProducts) {
   for (const item of sortedProducts) {
     const y = item.transform[5];
 
-    if (currentY == null || Math.abs(y - currentY) > ROW_Y_TOLERANCE) {
+    if (currentY == null || Math.abs(y - currentY) > getRowYTolerance()) {
       lines.push(item.str.trim());
       currentY = y;
     } else {
@@ -117,27 +125,12 @@ function emptyColumnLayout() {
 // Live title detection
 // ---------------------------------------------------------------------------
 
-function isGenericLiveTitle(text) {
-  const value = normalizePdfText(text);
-
-  if (/LIVE\s*-\s*AS SEEN/i.test(value)) return true;
-  if (/^SCREEN\s*\d*$/i.test(value)) return true;
-  if (/^ON\s+SCREEN\s*\d*$/i.test(value)) return true;
-
-  return false;
-}
-
 function isMaskableLiveTitle(text) {
-  const value = normalizePdfText(text);
-  if (isScreenIndicator(value)) return false;
-  return /LIVE\s*-\s*AS SEEN/i.test(value);
+  return isMaskableLiveTitleText(text);
 }
 
 function isScreenIndicator(text) {
-  const value = normalizePdfText(text);
-  return (
-    /^SCREEN\s*\d*$/i.test(value) || /^ON\s+SCREEN\s*\d*$/i.test(value)
-  );
+  return isLegacyScreenIndicator(text);
 }
 
 function isTableEndText(text) {
@@ -151,19 +144,24 @@ function isTableEndText(text) {
 
 function getPageSheetIndex(textContent) {
   const pageText = textContent.items.map(item => item.str).join(" ");
-  const liveMatch = pageText.match(
-    /([A-Z]+\s+LIVE\s*-\s*AS SEEN ON(?:\s+SCREEN)?(?:\s+\d+)?)/i
-  );
-
-  if (!liveMatch) {
-    return getLiveSheetIndex(pageText, []);
-  }
-
-  return getLiveSheetIndex(liveMatch[1], liveMatch[1].split(/\s+/));
+  return getPageDefaultLiveIndex(pageText);
 }
 
 function detectSheetIndexFromTitle(titleText, titleLines, pageSheetIndex, lastDetectedSheetIndex) {
-  if (/LIVE|SCREEN/i.test(titleText)) {
+  if (rowTitleMatchesScreenKeyword(titleText, titleLines)) {
+    const keywordIndex = getLiveSheetIndex(titleText, titleLines);
+    if (keywordIndex != null) return keywordIndex;
+    if (isStrictLiveMatchingEnabled()) return null;
+  }
+
+  if (isStrictLiveMatchingEnabled()) {
+    if (lastDetectedSheetIndex != null) {
+      return lastDetectedSheetIndex;
+    }
+    return null;
+  }
+
+  if (isLiveTitleText(titleText)) {
     return getLiveSheetIndex(titleText, titleLines);
   }
 
@@ -226,8 +224,8 @@ function getHeaderBaselineY(items, sellerSkuLabel) {
 
 function hasSellerSkuValues(dataItems, sellerSkuX) {
   return dataItems.some(item => {
-    if (!/^\d+$/.test(item.str.trim())) return false;
-    return Math.abs(item.transform[4] - sellerSkuX) <= SELLER_SKU_X_TOLERANCE;
+    if (!isAuctionSaleNumber(item.str.trim())) return false;
+    return Math.abs(item.transform[4] - sellerSkuX) <= getSellerSkuXTolerance();
   });
 }
 
@@ -241,8 +239,8 @@ function buildPackingItemsFromOrderedItems(
 
   const saleItems = dataItems.filter(item => {
     const text = item.str.trim();
-    if (!/^\d+$/.test(text)) return false;
-    return Math.abs(item.transform[4] - sellerSkuX) <= SELLER_SKU_X_TOLERANCE;
+    if (!isAuctionSaleNumber(text)) return false;
+    return Math.abs(item.transform[4] - sellerSkuX) <= getSellerSkuXTolerance();
   });
 
   if (saleItems.length === 0) return [];
@@ -284,7 +282,9 @@ function buildPackingItemsFromOrderedItems(
       lastDetectedSheetIndex
     );
 
-    if (/LIVE|SCREEN/i.test(titleText)) {
+    if (rowTitleMatchesScreenKeyword(titleText, titleLines) && sheetIndex != null) {
+      lastDetectedSheetIndex = sheetIndex;
+    } else if (!isStrictLiveMatchingEnabled() && isLiveTitleText(titleText)) {
       lastDetectedSheetIndex = sheetIndex;
     }
 
@@ -292,6 +292,7 @@ function buildPackingItemsFromOrderedItems(
       saleNumber: sale.str.trim(),
       saleItem: sale,
       liveTitle: titleText,
+      titleLines,
       sheetIndex,
       productItems: titleItems
     });
@@ -380,7 +381,9 @@ function findPackingTableHeaderRow(rows) {
 
 function parseLooseNumericRows(rows) {
   const results = [];
-  let lastDetectedSheetIndex = getPageSheetIndex({ items: rows.flatMap(r => r.items) });
+  const pageItems = rows.flatMap(r => r.items);
+  const pageSheetIndex = getPageSheetIndex({ items: pageItems });
+  let lastDetectedSheetIndex = null;
 
   for (const row of rows) {
     if (isTableEndText(row.text)) break;
@@ -391,94 +394,31 @@ function parseLooseNumericRows(rows) {
     });
     const titleLines = groupProductLines(titleItems);
     const titleText = titleLines.join(" ");
+    const sheetIndex = detectSheetIndexFromTitle(
+      titleText,
+      titleLines,
+      pageSheetIndex,
+      lastDetectedSheetIndex
+    );
 
-    if (/LIVE|SCREEN/i.test(titleText)) {
-      lastDetectedSheetIndex = getLiveSheetIndex(titleText, titleLines);
+    if (rowTitleMatchesScreenKeyword(titleText, titleLines) && sheetIndex != null) {
+      lastDetectedSheetIndex = sheetIndex;
+    } else if (!isStrictLiveMatchingEnabled() && isLiveTitleText(titleText)) {
+      lastDetectedSheetIndex = sheetIndex;
     }
 
-    const saleItem = row.items.find(item => /^\d+$/.test(item.str.trim()));
+    const saleItem = row.items.find(item => isAuctionSaleNumber(item.str.trim()));
     if (!saleItem) continue;
 
     results.push({
       saleNumber: saleItem.str.trim(),
       saleItem,
       liveTitle: titleText,
-      sheetIndex: lastDetectedSheetIndex,
+      titleLines,
+      sheetIndex,
       productItems: titleItems
     });
   }
 
   return results;
-}
-
-// ---------------------------------------------------------------------------
-// Text fallback matcher (content.js overlay)
-// ---------------------------------------------------------------------------
-
-function matchTikTokPackingItems(fullText, maps) {
-  const matches = [];
-  const seen = new Set();
-
-  const headerEnd = fullText.search(/Seller SKU\s+Qty/i);
-  if (headerEnd < 0) {
-    return matchSellerSkuFallback(fullText, maps);
-  }
-
-  const afterHeader = fullText.slice(headerEnd);
-  const tableEnd = afterHeader.search(/Qty Total/i);
-  const tableBody =
-    tableEnd >= 0 ? afterHeader.slice(0, tableEnd) : afterHeader;
-
-  const rowPattern = /(.+?)\s+(\d+)\s+(\d+)\s+(\d+)(?=\s|$)/g;
-  let rowMatch;
-
-  while ((rowMatch = rowPattern.exec(tableBody)) !== null) {
-    const liveTitle = rowMatch[1].trim();
-    const sellerSku = rowMatch[3];
-    const sheetIndex = getLiveSheetIndex(liveTitle);
-    const key = `${sheetIndex}:${sellerSku}`;
-
-    if (seen.has(key)) continue;
-
-    const productName = lookupProduct(maps, sheetIndex, sellerSku);
-    if (!productName) continue;
-
-    seen.add(key);
-    matches.push({ saleNumber: sellerSku, sheetIndex, liveTitle, productName });
-  }
-
-  if (matches.length === 0) {
-    return matchSellerSkuFallback(fullText, maps);
-  }
-
-  return matches;
-}
-
-function matchSellerSkuFallback(fullText, maps) {
-  const matches = [];
-  const seen = new Set();
-
-  const sellerSkuSection = fullText.split(/Seller SKU/i)[1];
-  if (!sellerSkuSection) return matches;
-
-  const liveMatch = fullText.match(
-    /([A-Z]+\s+LIVE\s*-\s*AS SEEN ON SCREEN(?:\s+\d+)?)/i
-  );
-  const liveTitle = liveMatch ? liveMatch[1] : "";
-  const sheetIndex = getLiveSheetIndex(liveTitle);
-
-  const numbers = sellerSkuSection.match(/\b(\d+)\b/g) || [];
-
-  for (const saleNumber of numbers) {
-    const key = `${sheetIndex}:${saleNumber}`;
-    if (seen.has(key)) continue;
-
-    const productName = lookupProduct(maps, sheetIndex, saleNumber);
-    if (!productName) continue;
-
-    seen.add(key);
-    matches.push({ saleNumber, sheetIndex, liveTitle, productName });
-  }
-
-  return matches;
 }

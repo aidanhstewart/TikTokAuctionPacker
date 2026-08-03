@@ -1,190 +1,210 @@
-<!-- popup.html -->
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>TikTok Shop Enhancer</title>
-  <style>
-    body {
-      width: 360px;
-      max-height: 620px;
-      overflow-y: auto;
-      padding: 15px;
-      font-family: Arial, sans-serif;
-      color: #222;
-    }
-
-    h2 {
-      margin: 0 0 4px;
-      font-size: 18px;
-    }
-
-    .subtitle {
-      font-size: 12px;
-      color: #666;
-      margin-bottom: 14px;
-    }
-
-    label {
-      display: block;
-      font-size: 12px;
-      font-weight: bold;
-      margin-top: 12px;
-      margin-bottom: 6px;
-    }
-
-    input[type="text"],
-    input[type="file"] {
-      width: 100%;
-      padding: 10px;
-      box-sizing: border-box;
-    }
-
-    input[type="file"] {
-      padding: 8px;
-    }
-
-    button {
-      width: 100%;
-      margin-top: 10px;
-      padding: 10px;
-      cursor: pointer;
-    }
-
-    button.secondary {
-      background: #f3f3f3;
-      border: 1px solid #ccc;
-    }
-
-    button.danger {
-      background: #fff5f5;
-      border: 1px solid #e8b4b4;
-      color: #8a1f1f;
-    }
-
-    .hint {
-      font-size: 11px;
-      color: #555;
-      margin-top: 4px;
-      line-height: 1.45;
-    }
-
-    .setupMode {
-      font-size: 12px;
-      margin-bottom: 10px;
-      padding: 8px 10px;
-      border-radius: 6px;
-      background: #f7f7f7;
-      border: 1px solid #ddd;
-    }
-
-    .setupMode.ready {
-      background: #eef8ee;
-      border-color: #b9d9b9;
-    }
-
-    .status {
-      font-size: 12px;
-      margin-top: 8px;
-      padding: 8px 10px;
-      border-radius: 6px;
-      background: #f0f7ff;
-      border: 1px solid #c8ddf5;
-      line-height: 1.45;
-      white-space: pre-line;
-    }
-
-    .status.empty {
-      background: #fafafa;
-      border-color: #ddd;
-      color: #666;
-    }
-
-    .status.warn {
-      background: #fff8e8;
-      border-color: #e8d39b;
-    }
-
-    .status.blocked {
-      background: #fff4f4;
-      border-color: #e4b4b4;
-      color: #7a1e1e;
-    }
-
-    details {
-      margin-top: 16px;
-      border-top: 1px solid #ddd;
-      padding-top: 12px;
-    }
-
-    summary {
-      cursor: pointer;
-      font-size: 12px;
-      font-weight: bold;
-      color: #444;
-    }
-
-    .buttonRow {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-    }
-
-    .buttonRow button {
-      margin-top: 0;
-    }
-  </style>
+  <title>TikTok Packer</title>
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <h2>TikTok Shop Enhancer</h2>
-  <div class="subtitle">Upload one workbook, then open packing-list PDFs.</div>
+  <div id="mainView" class="view app">
+    <header class="brandHeader">
+      <div class="brandMark" aria-hidden="true">TP</div>
+      <div>
+        <h1>TikTok Packer</h1>
+        <p class="subtitle">Link a spreadsheet or upload Excel, then open packing-list PDFs.</p>
+      </div>
+    </header>
 
-  <div id="setupMode" class="setupMode">Checking setup...</div>
+    <div id="setupMode" class="setupMode">Checking setup...</div>
 
-  <label for="workbookFile">Excel workbook (recommended)</label>
-  <input id="workbookFile" type="file" accept=".xlsx,.xls,.xlsm" />
-  <div class="hint">
-    Google Sheets: File &gt; Download &gt; Microsoft Excel (.xlsx).<br>
-    Each tab = one live (tab 1 = Live 1, tab 2 = Live 2, etc.).<br>
-    Column A = sale #, column B = product name. Row 1 is the header.<br>
-    Column C must be empty before packing (used for item checks).<br>
-    Tabs with "COST" in the name are ignored. Row 1 is the header.
+    <div class="sourceModeRow" role="tablist">
+      <button id="sourceSpreadsheetBtn" class="sourceBtn active" type="button" role="tab">Google Sheet</button>
+      <button id="sourceWorkbookBtn" class="sourceBtn" type="button" role="tab">Workbook</button>
+    </div>
+
+    <div id="spreadsheetPanel" class="sourcePanel card">
+      <label for="spreadsheetUrl">Google Spreadsheet URL</label>
+      <input id="spreadsheetUrl" type="url" placeholder="https://docs.google.com/spreadsheets/d/...">
+
+      <p class="hint">Paste the main spreadsheet link. Every tab loads automatically — one tab per live. Data refreshes each time you open a PDF.</p>
+
+      <div class="buttonRow triple">
+        <button id="saveSpreadsheetBtn" type="button">Link spreadsheet</button>
+        <button id="reloadSpreadsheetBtn" class="secondary" type="button" disabled>Reload</button>
+        <button id="clearSpreadsheetBtn" class="secondary" type="button">Clear</button>
+      </div>
+    </div>
+
+    <div id="workbookPanel" class="sourcePanel card" hidden>
+      <label for="workbookFile">Excel workbook file</label>
+      <input id="workbookFile" type="file" accept=".xlsx,.xls,.xlsm">
+
+      <p class="hint">Upload a local .xlsx file. Column A = sale #, column B = product name. Adjust columns in Settings if needed.</p>
+
+      <div class="buttonRow">
+        <button id="reloadWorkbookBtn" class="secondary" type="button" disabled>Re-upload file</button>
+        <button id="clearWorkbookBtn" class="secondary" type="button">Clear file</button>
+      </div>
+    </div>
+
+    <div id="workbookStatus" class="status empty">No product data loaded.</div>
+
+    <button id="openSettingsBtn" class="secondary" type="button">Settings</button>
   </div>
 
-  <div id="workbookStatus" class="status empty">No workbook loaded.</div>
+  <div id="settingsView" class="view app" hidden>
+    <div class="settingsHeader">
+      <button id="backBtn" class="linkBtn" type="button">← Back</button>
+      <h2>Settings</h2>
+    </div>
 
-  <div class="buttonRow">
-    <button id="clearWorkbookBtn" class="secondary" type="button">Clear workbook</button>
-    <button id="reloadWorkbookBtn" class="secondary" type="button" disabled>Reload file</button>
+    <section class="settingsGroup">
+      <p class="settingsGroupTitle">Live screen matching</p>
+      <label for="liveTitleScreenKeyword">Screen keyword</label>
+      <input id="liveTitleScreenKeyword" type="text" placeholder="SCREEN">
+      <p class="hint">
+        Picks which spreadsheet tab to use. With keyword <code>SCREEN</code>:
+        <code>... AS SEEN ON SCREEN</code> → Live 1,
+        <code>... SCREEN 2</code> → Live 2.
+        Use <code>FRAGRANCE</code> for
+        <code>... &amp; FRAGRANCE</code> / <code>... FRAGRANCE 2</code>.
+      </p>
+      <label class="toggleRow">
+        <input id="strictLiveMatching" type="checkbox">
+        <span>Strict live matching</span>
+      </label>
+      <p class="hint">Only assigns a live when your screen keyword appears in the row title. Does not search other live tabs.</p>
+    </section>
+
+    <section class="settingsGroup">
+      <label class="toggleRow">
+        <input id="workbookUseCustomColumns" type="checkbox" data-controls="workbookBody">
+        <span>Custom workbook columns</span>
+      </label>
+      <div id="workbookBody" class="sectionBody">
+        <div class="fieldGrid compact">
+          <label for="saleColumn">Sale # column</label>
+          <input id="saleColumn" type="text" maxlength="2" placeholder="A">
+          <label for="productColumn">Product column</label>
+          <input id="productColumn" type="text" maxlength="2" placeholder="B">
+          <label for="itemCheckColumn">Item-check column</label>
+          <input id="itemCheckColumn" type="text" maxlength="2" placeholder="C">
+          <label for="headerRows">Header rows</label>
+          <input id="headerRows" type="number" min="0" max="20" placeholder="1">
+          <label for="ignoreTabPattern">Ignore tabs containing</label>
+          <input id="ignoreTabPattern" type="text" placeholder="COST">
+        </div>
+      </div>
+    </section>
+
+    <section class="settingsGroup">
+      <label class="toggleRow">
+        <input id="showLivePrefix" type="checkbox" data-controls="overlayBody">
+        <span>Show live prefix on labels</span>
+      </label>
+      <div id="overlayBody" class="sectionBody">
+        <div class="fieldGrid compact">
+          <label for="livePrefixFormat">Prefix format</label>
+          <input id="livePrefixFormat" type="text" placeholder="S{n}:">
+          <label for="noMatchText">No-match text</label>
+          <input id="noMatchText" type="text" placeholder="no match">
+        </div>
+        <p class="hint">Use <code>{n}</code> for the live number. A space is added automatically before the product name.</p>
+      </div>
+    </section>
+
+    <section class="settingsGroup">
+      <label class="toggleRow">
+        <input id="printerUseCustom" type="checkbox" data-controls="printerBody">
+        <span>Custom printer / label settings</span>
+      </label>
+      <div id="printerBody" class="sectionBody">
+        <div class="fieldGrid compact">
+          <label for="labelWidthIn">Label width (in)</label>
+          <input id="labelWidthIn" type="number" min="1" max="12" step="0.1">
+          <label for="labelHeightIn">Label height (in)</label>
+          <input id="labelHeightIn" type="number" min="1" max="12" step="0.1">
+          <label for="labelDpi">DPI</label>
+          <input id="labelDpi" type="number" min="72" max="600">
+          <label for="renderScale">Render scale</label>
+          <input id="renderScale" type="number" min="1" max="4">
+          <label for="monoThreshold">Mono threshold</label>
+          <input id="monoThreshold" type="number" min="0" max="255">
+          <label for="printHint">Print hint</label>
+          <input id="printHint" type="text">
+        </div>
+      </div>
+    </section>
+
+    <section class="settingsGroup">
+      <label class="toggleRow">
+        <input id="pdfUseCustom" type="checkbox" data-controls="pdfBody">
+        <span>Custom PDF parsing settings</span>
+      </label>
+      <div id="pdfBody" class="sectionBody">
+        <div class="fieldGrid compact">
+          <label for="rowYTolerance">Row Y tolerance</label>
+          <input id="rowYTolerance" type="number" min="1" max="30">
+          <label for="sellerSkuXTolerance">Seller SKU X tolerance</label>
+          <input id="sellerSkuXTolerance" type="number" min="5" max="120">
+        </div>
+      </div>
+    </section>
+
+    <section class="settingsGroup">
+      <label class="toggleRow">
+        <input id="redirectEnabled" type="checkbox" data-controls="redirectBody">
+        <span>Auto-open packing PDFs</span>
+      </label>
+      <div id="redirectBody" class="sectionBody">
+        <div class="fieldGrid compact">
+          <label for="redirectHostPattern">URL must contain</label>
+          <input id="redirectHostPattern" type="text" placeholder="tiktok">
+          <label for="redirectExtraUrlContains">Also match URL containing</label>
+          <input id="redirectExtraUrlContains" type="text" placeholder="oec_fulfillment_doc">
+          <label for="redirectLocalPdfs">Intercept local PDF files</label>
+          <input id="redirectLocalPdfs" type="checkbox">
+        </div>
+      </div>
+    </section>
+
+    <section class="settingsGroup">
+      <label class="toggleRow">
+        <input id="itemChecksEnabled" type="checkbox" data-controls="itemChecksBody">
+        <span>Item checks</span>
+      </label>
+      <div id="itemChecksBody" class="sectionBody">
+        <label class="toggleRow nested">
+          <input id="itemChecksBlockPacking" type="checkbox">
+          <span>Block packing when checks are pending</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="settingsGroup">
+      <label class="toggleRow">
+        <input id="debugMode" type="checkbox">
+        <span>Debug logging in viewer</span>
+      </label>
+    </section>
+
+    <section class="settingsGroup">
+      <p class="settingsGroupTitle">Backup &amp; restore</p>
+      <p class="hint" style="margin-top: 0;">Export or import settings, spreadsheet URL, and workbook data.</p>
+      <div class="buttonRow">
+        <button id="exportConfigBtn" type="button">Export backup</button>
+        <button id="importConfigBtn" class="secondary" type="button">Import backup</button>
+      </div>
+      <input id="importConfigFile" type="file" accept=".json,application/json" hidden>
+    </section>
+
+    <div class="buttonRow settingsActions">
+      <button id="saveSettingsBtn" type="button">Save settings</button>
+      <button id="resetSettingsBtn" class="secondary" type="button">Reset defaults</button>
+    </div>
   </div>
 
-  <details>
-    <summary>Legacy: Google Sheet links (fallback)</summary>
-
-    <label for="sheetUrl1">Live 1 sheet</label>
-    <input id="sheetUrl1" placeholder="DAY LIVE - AS SEEN ON SCREEN" />
-
-    <label for="sheetUrl2">Live 2 sheet</label>
-    <input id="sheetUrl2" placeholder="DAY LIVE - AS SEEN ON SCREEN 2" />
-
-    <label for="sheetUrl3">Live 3 sheet (optional)</label>
-    <input id="sheetUrl3" placeholder="DAY LIVE - AS SEEN ON SCREEN 3" />
-
-    <label for="sheetUrl4">Live 4 sheet (optional)</label>
-    <input id="sheetUrl4" placeholder="DAY LIVE - AS SEEN ON SCREEN 4" />
-
-    <label for="sheetUrl5">Live 5 sheet (optional)</label>
-    <input id="sheetUrl5" placeholder="DAY LIVE - AS SEEN ON SCREEN 5" />
-
-    <label for="sheetUrl6">Live 6 sheet (optional)</label>
-    <input id="sheetUrl6" placeholder="DAY LIVE - AS SEEN ON SCREEN 6" />
-
-    <div class="hint">Only used when no workbook is loaded. Live 1 and Live 2 are required.</div>
-
-    <button id="saveBtn" type="button">Save sheet links</button>
-    <button id="clearLinksBtn" class="danger" type="button">Clear sheet links</button>
-  </details>
-
+  <script src="settings.js"></script>
   <script src="xlsx.full.min.js"></script>
   <script src="sheetUtils.js"></script>
   <script src="workbookParser.js"></script>

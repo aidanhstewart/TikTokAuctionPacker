@@ -1,6 +1,5 @@
-<!-- viewer.html -->
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>TikTok Shop PDF Viewer</title>
@@ -8,15 +7,28 @@
 </head>
 <body>
   <div id="toolbar">
-    <button id="printBtn">Print</button>
-    <span class="printHint">TSC: 4x6 label, scale 100%, no fit-to-page</span>
+    <div class="toolbarBrand">
+      <div class="toolbarMark" aria-hidden="true">TP</div>
+      <div class="toolbarTitles">
+        <span class="toolbarTitle">TikTok Packer</span>
+        <span id="dataFreshness" class="dataFreshness">Loading product data...</span>
+      </div>
+    </div>
+    <button id="printBtn" type="button" disabled>Print labels</button>
+    <span class="printHint">TSC: 4×6 label, scale 100%, no fit-to-page</span>
   </div>
 
+  <div id="matchSummary" class="matchSummary" hidden></div>
+
+  <div id="loadingBanner" class="loadingBanner">Loading packing list...</div>
   <div id="errorBanner" class="errorBanner" hidden></div>
   <div id="pdfContainer"></div>
 
   <script src="pdfjs/pdf.min.js"></script>
+  <script src="settings.js"></script>
+  <script src="xlsx.full.min.js"></script>
   <script src="sheetUtils.js"></script>
+  <script src="workbookParser.js"></script>
   <script src="pdfParser.js"></script>
   <script src="viewer.js"></script>
 

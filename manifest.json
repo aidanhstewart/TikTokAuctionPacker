@@ -1,7 +1,8 @@
-{  "manifest_version": 3,
+{
+  "manifest_version": 3,
   "name": "TikTok Packer",
-  "version": "1.0",
-  "description": "Render TikTok Shop packing lists with product names from Seller SKU.",
+  "version": "1.8.3",
+  "description": "Overlay product names on TikTok Shop packing-list PDFs for thermal label printing.",
   "permissions": [
     "storage",
     "tabs",
@@ -14,7 +15,8 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_title": "TikTok Packer"
   },
   "web_accessible_resources": [
     {

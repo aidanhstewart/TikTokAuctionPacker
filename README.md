@@ -1,165 +1,314 @@
-# TikTok Shop Packing List Enhancer
+<div align="center">
 
-A Chrome extension that takes a TikTok Shop packing‑list PDF and overlays the matching product name (looked up from a Google Sheet) next to each line item, then prints the result on a 4×6 thermal label printer (e.g. TSC 203 DPI).
+# TikTok Packer
 
-It's built for sellers who run their orders out of TikTok Live auctions, where the PDF only shows the buyer's "Seller SKU" number (the auction sale number) and not the actual product they won.
+**Turn TikTok Shop packing-list PDFs into print-ready 4×6 thermal labels — with product names pulled straight from your spreadsheet.**
 
----
+[![Chrome Extension](https://img.shields.io/badge/Chrome-MV3-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/mv3/)
+[![Version](https://img.shields.io/badge/version-1.8.3-00f2ea?style=for-the-badge)](manifest.json)
+[![TikTok Shop](https://img.shields.io/badge/built%20for-TikTok%20Live-000000?style=for-the-badge&logo=tiktok&logoColor=white)](https://seller.tiktok.com/)
 
-## What it does
+*No server. No subscription. Your data stays in the browser.*
 
-When you open a TikTok Shop packing list PDF in Chrome, the extension:
+[Quick start](#-quick-start) · [How matching works](#-how-live-matching-works) · [Settings](#%EF%B8%8F-settings) · [Troubleshooting](#-troubleshooting)
 
-1. Detects the PDF and redirects the tab to its own viewer.
-2. Renders the PDF at 4×6 inches @ 203 DPI on a high‑res canvas (tuned for TSC thermal printers).
-3. Parses the items in the packing‑list table.
-4. For each item, decides which live auction it came from (Live 1 vs. Live 2) based on the row's product‑name text.
-5. Looks up the Seller SKU (the auction sale number) in the matching Google Sheet to get the actual product name.
-6. Draws the looked‑up product name beside the original row, prefixed with `S1:` or `S2:` so you can cross‑check it.
-7. Lets you hit **Print** to send a clean, monochrome version to the thermal printer.
+</div>
 
 ---
 
-## Installation
+## The problem
 
-1. Clone or download this repo.
-2. In Chrome, open `chrome://extensions`.
-3. Turn on **Developer mode** (top‑right toggle).
-4. Click **Load unpacked** and choose this folder.
-5. The "TikTok Shop Packing List Enhancer" extension should appear in your toolbar.
+TikTok Shop packing lists show **Seller SKU** — your auction sale number (e.g. `810`) — but **not** the product name the buyer won.
 
----
+When you're packing dozens of orders after a live stream, reading sale numbers off a PDF and cross-referencing a spreadsheet is slow and error-prone.
 
-## Setup — Google Sheets
+## The solution
 
-You need two published‑to‑web CSV URLs, one per live auction.
+**TikTok Packer** is a Chrome extension that:
 
-### Sheet format
+1. Intercepts packing-list PDFs from TikTok Seller Center
+2. Looks up each sale number in your Google Sheet or Excel workbook
+3. Overlays the product name on a **4×6 thermal label** layout
+4. Tells you exactly which sale numbers didn't match — before you print
 
-Each sheet must have two columns:
-
-| Column A     | Column B           |
-|--------------|--------------------|
-| Sale Number  | Product Name       |
-| 1            | 500ML DESIRE       |
-| 2            | 150ML DIFFUSER     |
-| 3            | FAIRY 2.6L         |
-| …            | …                  |
-
-- The first row is treated as a header and skipped.
-- Column A must contain only the sale number (e.g. `62`, not `Sale 62`).
-- Column B is the product name to show on the label.
-
-### Publish the sheet as CSV
-
-In Google Sheets:
-
-1. **File → Share → Publish to web**.
-2. Pick the correct **tab/sheet** from the first dropdown.
-3. Pick **Comma‑separated values (.csv)** from the second dropdown.
-4. Click **Publish** and copy the resulting URL.
-5. Repeat for the second live's sheet.
-
-### Save the URLs in the extension
-
-1. Click the extension icon in Chrome.
-2. Paste the **Live 1** CSV URL into the first input.
-3. Paste the **Live 2** CSV URL into the second input.
-4. Click **Save**.
-
-The URLs are kept in `chrome.storage.local` and reused on every PDF.
-
----
-
-## Usage
-
-1. In TikTok Seller Center, open a packing list. The extension auto‑detects the PDF and opens it inside its own viewer.
-2. Each row will show:
-   - The original PDF row, **unchanged** on the left (so you can see the title that came from TikTok).
-   - The looked‑up product name on the right, in place of the duplicate SKU number, prefixed with `S1:` or `S2:` to indicate which sheet it came from.
-3. Click **Print** to send to your thermal printer. The page is flattened to a true 4×6 @ 203 DPI monochrome bitmap before printing for a crisp thermal output.
-
-If a row shows `S1:` or `S2: (no match)`, the sale number wasn't found in that sheet — typically a row missing from the sheet, or a typo in the sale number column.
-
----
-
-## How the "Live 1 vs Live 2" detection works
-
-TikTok prints each row's product name as something like:
-
-```
-SUNDAY LIVE - AS SEEN ON
-SCREEN              <- this row is from Live 1
-```
-
-or:
-
-```
-SUNDAY LIVE - AS SEEN ON
-SCREEN 2            <- this row is from Live 2
-```
-
-The extension reads the title text that physically sits in each row's vertical band on the page and routes the lookup to the matching sheet — `SCREEN` → Live 1, `SCREEN 2` → Live 2.
-
-Row boundaries are computed as the **midpoint** between consecutive sale‑number Y positions, so the title is always bound to the correct sale regardless of which line the sale number's baseline sits on.
-
----
-
-## Project structure
-
-```
-manifest.json     Chrome MV3 manifest (permissions, viewer registration)
-background.js     Service worker — detects TikTok packing PDFs and redirects them to viewer.html
-content.js       Legacy on‑page overlay (used as a fallback when the PDF isn't redirected)
-popup.html       Settings UI for the two Google Sheet URLs
-popup.js         Saves/loads the sheet URLs to chrome.storage.local
-viewer.html      Standalone viewer page used after the redirect
-viewer.js        Renders the PDF, runs the parser, draws the overlay, handles printing
-pdfParser.js     Parses the TikTok packing‑list table out of the raw PDF text items
-sheetUtils.js    Fetches the CSV sheets and provides lookupProduct() / getLiveSheetIndex()
-styles.css       Viewer / print styling
-pdfjs/           Bundled PDF.js library + worker
+```mermaid
+flowchart LR
+  A[TikTok packing PDF] --> B[Extension viewer]
+  C[Google Sheet / Excel] --> B
+  B --> D[Label with product name]
+  B --> E[Match summary banner]
+  D --> F[Print to TSC 4×6]
 ```
 
 ---
 
-## Debugging
+## ✨ Features
 
-Each row's parsing decision is logged to the viewer page's DevTools console (right‑click → **Inspect** → **Console**) in this form:
+| Feature | What it does |
+|---------|--------------|
+| **Auto PDF capture** | Opens packing lists in a custom viewer instead of Chrome's built-in PDF reader |
+| **Google Sheet linking** | Paste one spreadsheet URL — every tab loads as a separate live |
+| **Excel workbook upload** | Works offline with a local `.xlsx` file |
+| **Live screen detection** | Configurable keyword (`SCREEN`, `FRAGRANCE`, etc.) maps PDF rows to the right spreadsheet tab |
+| **Strict live matching** | Only matches within the detected live — no cross-tab guessing |
+| **Smart sale # filtering** | Ignores long TikTok platform SKUs; only looks up real auction sale numbers |
+| **Match summary** | `8 matched · 1 no match` banner with a list of missing sale numbers |
+| **Red highlight** | Unmatched rows are visually flagged on the label |
+| **Auto-refresh** | Product data reloads every time you open a PDF |
+| **Item checks** | Optional column C gate — block packing until checks are cleared |
+| **Backup & restore** | Export/import settings, spreadsheet URL, and workbook in one JSON file |
+| **Thermal-ready** | Renders at 4×6 in @ 203 DPI (TSC and similar printers) |
+
+---
+
+## 🚀 Quick start
+
+### 1. Install
+
+```bash
+git clone https://github.com/aidanhstewart/TikTokAuctionPacker-unlimited.git
+```
+
+1. Open **`chrome://extensions`**
+2. Enable **Developer mode** (top right)
+3. Click **Load unpacked** → select the cloned folder
+
+### 2. Connect your product data
+
+**Option A — Google Spreadsheet** *(recommended)*
+
+1. Click the extension icon → **Google Sheet** tab
+2. Paste your spreadsheet URL
+3. Share the sheet as **Anyone with the link can view**
+4. Click **Link spreadsheet**
+
+> Every tab in the spreadsheet becomes a live: tab 1 → Live 1, tab 2 → Live 2, and so on. Data refreshes automatically each time you open a PDF.
+
+**Option B — Excel workbook**
+
+1. Click **Workbook** tab
+2. Upload a `.xlsx` file (export from Google Sheets via *File → Download → Microsoft Excel*)
+
+### 3. Pack and print
+
+1. Open a packing list from **TikTok Seller Center** — the extension redirects it to the label viewer
+2. Check the toolbar: **Sheet data: refreshed …**
+3. Review the match summary banner at the top
+4. Click **Print labels** (TSC: 4×6, scale 100%, no fit-to-page)
+
+---
+
+## 📋 Spreadsheet format
+
+| Column A | Column B | Column C *(optional)* |
+|----------|----------|------------------------|
+| Sale # | Product name | Item check |
+| 62 | 500ML DESIRE | |
+| 810 | FAIRY 2.6L | ✓ |
+
+**Rules:**
+
+- **Row 1** is the header row (skipped by default)
+- **Column A** = auction sale number — the short number from the PDF's **Seller SKU** column
+- **Column B** = product name printed on the label
+- **Column C** = item checks — if enabled, packing is blocked while any cell has a value
+- Tabs whose name contains **`COST`** are ignored automatically
+
+---
+
+## 🎯 How live matching works
+
+TikTok packing lists group orders by live stream. The extension reads the **product title** on each row and figures out which spreadsheet tab to search.
+
+### Screen keyword
+
+Set your keyword in **Settings → Screen keyword** (default: `SCREEN`).
+
+| PDF row title | Keyword `SCREEN` | Keyword `FRAGRANCE` |
+|---------------|------------------|---------------------|
+| `MONDAY LIVE - AS SEEN ON SCREEN` | Live 1 | — |
+| `MONDAY LIVE - AS SEEN ON SCREEN 2` | Live 2 | — |
+| `MONDAY LIVE - BEDDING, HOMEWARE & FRAGRANCE` | — | Live 1 |
+| `MONDAY LIVE - BEDDING, HOMEWARE & FRAGRANCE 2` | — | Live 2 |
+
+Rows **below** a keyword header inherit that live until the next keyword appears.
+
+### Strict live matching
+
+Enable **Settings → Strict live matching** when you run multiple lives in one spreadsheet and want zero cross-tab guessing.
+
+| | Normal | Strict |
+|---|--------|--------|
+| Assigns a live | Keyword, `LIVE -` titles, or inherited context | **Only** when your keyword appears (then inherited below) |
+| Lookup fallback | Searches other tabs if not found | **Only** the assigned live tab |
+| Default to Live 1 | Yes, when nothing else matches | **No** |
+
+### Sale number filtering
+
+PDFs contain two kinds of numbers in the SKU area:
+
+- **Auction sale numbers** — short values like `62`, `810` → looked up in your sheet
+- **TikTok platform SKUs** — long 15–18 digit IDs → **ignored** (not counted as misses)
+
+---
+
+## ⚙️ Settings
+
+Open **Settings** from the extension popup.
+
+<details>
+<summary><strong>Live screen matching</strong></summary>
+
+| Setting | Description |
+|---------|-------------|
+| Screen keyword | Word that identifies live blocks in PDF titles |
+| Strict live matching | Keyword-only live assignment + no cross-tab lookup |
+
+</details>
+
+<details>
+<summary><strong>Workbook columns</strong></summary>
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Sale # column | A | Auction sale number |
+| Product column | B | Name printed on label |
+| Item-check column | C | Must be empty before packing |
+| Header rows | 1 | Rows to skip at top of each tab |
+| Ignore tabs containing | COST | Tab name filter |
+
+</details>
+
+<details>
+<summary><strong>Label overlay</strong></summary>
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Show live prefix | On | Prefix matched names with `S1:`, `S2:`, etc. |
+| Prefix format | `S{n}:` | Use `{n}` for live number (space before product name is automatic) |
+| No-match text | `no match` | Shown when lookup fails |
+
+</details>
+
+<details>
+<summary><strong>Printer, PDF parsing, redirects, backup</strong></summary>
+
+- **Printer** — Label size (4×6 in), DPI (203), render scale, mono threshold
+- **PDF parsing** — Row Y tolerance and Seller SKU column alignment
+- **Auto-open PDFs** — Intercept TikTok packing-list URLs automatically
+- **Item checks** — Enable/disable and block packing when checks are pending
+- **Backup & restore** — Export or import full config as JSON
+- **Debug logging** — Console output per sale lookup (F12 in viewer)
+
+</details>
+
+---
+
+## 🔧 Troubleshooting
+
+<details>
+<summary><strong>Spreadsheet won't link</strong></summary>
+
+- Confirm the sheet is shared as **Anyone with the link can view**
+- Use the main spreadsheet URL (`/spreadsheets/d/...`), not a single-tab link
+- Click **Reload** in the popup to force a fresh fetch
+
+</details>
+
+<details>
+<summary><strong>Everything shows "no match"</strong></summary>
+
+- Check that sale numbers in column A match the **Seller SKU** column in the PDF (short numbers, not long platform IDs)
+- Verify the correct live tab — try enabling **Strict live matching** to catch wrong keyword detection
+- Open the viewer console (F12) with **Debug logging** enabled to see per-row lookups
+
+</details>
+
+<details>
+<summary><strong>Wrong live tab is used</strong></summary>
+
+- Confirm your **screen keyword** matches the text in the PDF row titles
+- Enable **Strict live matching** so rows only match after your keyword appears
+- Remember: spreadsheet tab order = Live 1, Live 2, …
+
+</details>
+
+<details>
+<summary><strong>Match summary looks wrong</strong></summary>
+
+- Long numeric IDs in the PDF are TikTok platform SKUs — the extension ignores these automatically
+- Only short auction sale numbers (≤ 10 digits) are counted in the summary
+- With strict matching on, only rows under a keyword-detected live are included
+
+</details>
+
+<details>
+<summary><strong>Print quality issues</strong></summary>
+
+- Printer: **4×6 label**, **scale 100%**, **no fit-to-page**
+- Default DPI is 203 (TSC thermal). Adjust in Settings if your printer differs
+- Increase **render scale** for sharper text on high-DPI printers
+
+</details>
+
+---
+
+## 🐛 Debug output
+
+Enable **Debug logging in viewer** in Settings, then open the browser console (F12) while viewing a PDF:
 
 ```
 [TikTokPacker] {
   page: 1,
   saleNumber: "62",
   sheetIndex: 2,
-  detectedTitle: "SUNDAY LIVE - AS SEEN ON SCREEN 2",
+  detectedTitle: "MONDAY LIVE - AS SEEN ON SCREEN 2",
   lookedUpProduct: "FAIRY 2.6L"
 }
 ```
 
-If the overlay shows the wrong product:
+---
 
-1. **Wrong `sheetIndex`** → the parser misread the row's title. Check that the row's `detectedTitle` matches what the PDF visually shows on that row.
-2. **Right `sheetIndex`, `lookedUpProduct: null`** → the sale number isn't in that sheet's column A.
-3. **Right `sheetIndex`, wrong `lookedUpProduct`** → the wrong product name is in column B of that sheet row.
+## 📁 Project structure
 
-The `S1:` / `S2:` prefix on the printed overlay is a deliberate visual aid so the picker can spot a mis‑routed row at a glance.
+```
+TikTokAuctionPacker-unlimited/
+├── manifest.json          Chrome MV3 manifest
+├── background.js          PDF redirect to custom viewer
+├── popup.html / .js / .css   Extension popup UI
+├── viewer.html / .js      Label viewer + print pipeline
+├── pdfParser.js           TikTok packing-list table parser
+├── sheetUtils.js          Storage, lookup, live detection
+├── workbookParser.js      Excel + Google Sheet parsing
+├── settings.js            User settings + defaults
+├── styles.css             Viewer styles
+└── pdfjs/                 Bundled PDF.js
+```
 
 ---
 
-## Thermal printer notes
+## 🔒 Privacy & permissions
 
-- Target: 4×6 inch labels at 203 DPI (812 × 1218 px). Defaults are in the `THERMAL` constant at the top of `viewer.js`.
-- Print output is dithered to pure black/white using a luminance threshold of `165` (also configurable at the top of `viewer.js`).
-- Internal render is at 2× the target resolution (`RENDER_SCALE = 2`) and downsampled at print time to keep text crisp.
-- For a different printer, change `widthIn`, `heightIn`, `dpi`, and (if needed) `MONO_THRESHOLD`.
+| Permission | Why |
+|------------|-----|
+| `storage` | Save settings, spreadsheet URL, and workbook data locally |
+| `tabs` + `webNavigation` | Detect and redirect TikTok packing-list PDFs |
+| `<all_urls>` | Fetch PDF URLs and Google Spreadsheet exports |
+
+**No analytics. No remote servers. No accounts.** All processing happens in your browser. The only external requests are to TikTok (PDFs) and Google (spreadsheet export).
 
 ---
 
-## Permissions used
+## 📄 License
 
-- `storage` — to remember the two Google Sheet URLs.
-- `tabs` + `webNavigation` — to detect TikTok packing‑list URLs and redirect them to the viewer.
-- `host_permissions: <all_urls>` — required so the redirect works on TikTok's signed S3 PDF URLs and so the viewer can fetch the published Google Sheet CSVs.
+Private / all rights reserved — adjust this section if you add an open-source license.
 
-No analytics, no remote code, nothing leaves your browser except the CSV fetch to Google's published sheet URL.
+---
+
+<div align="center">
+
+**Built for TikTok Live sellers who pack fast and hate guessing.**
+
+If this saves you time on packing night, ⭐ star the repo.
+
+</div>
