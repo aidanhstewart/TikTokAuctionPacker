@@ -1,5 +1,8 @@
 // viewer.js - TSC thermal printers (configurable label size / DPI)
 
+const LARGE_PDF_TEXT_LAYER_PAGE_LIMIT = 80;
+const RENDER_PROGRESS_INTERVAL = 25;
+
 let textLayerObserver = null;
 
 function createMatchStats() {
@@ -116,7 +119,7 @@ function getPdfUrlFromQuery() {
 }
 
 async function loadProductMaps() {
-  let stored = await chrome.storage.local.get(getSheetStorageKeys());
+  let stored = await storageGet(getSheetStorageKeys());
   loadSettings(stored);
   applyViewerSettings();
 
@@ -127,11 +130,19 @@ async function loadProductMaps() {
     const refreshResult = await refreshWorkbookFromSource(stored);
     if (refreshResult) {
       refreshMeta = refreshResult;
-      stored = await chrome.storage.local.get(getSheetStorageKeys());
+      stored = await storageGet(getSheetStorageKeys());
     }
   }
 
-  await assertNoPendingItemChecks(stored);
+  const itemChecksVerified = !(refreshMeta.fromCache && refreshMeta.error);
+  if (itemChecksVerified) {
+    await assertNoPendingItemChecks(stored);
+  } else if (hasPendingItemChecks(stored)) {
+    console.warn(
+      "[TikTokPacker] Skipping item-check block because product data could not be refreshed."
+    );
+  }
+
   const maps = await resolveSheetMaps(stored);
   if (!maps) {
     throw new Error("NO_PRODUCT_DATA");
@@ -162,19 +173,26 @@ function showMatchSummary(stats) {
 
   if (stats.unmatched.length > 0) {
     const seen = new Set();
-    const saleList = stats.unmatched
-      .filter(entry => {
-        const key = `${entry.page}:${entry.saleNumber}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      })
+    const maxListed = 30;
+    const entries = stats.unmatched.filter(entry => {
+      const key = `${entry.page}:${entry.saleNumber}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    const saleList = entries
+      .slice(0, maxListed)
       .map(entry => {
         const live = entry.sheetIndex ? ` (Live ${entry.sheetIndex})` : "";
         return `#${entry.saleNumber}${live}`;
       })
       .join(", ");
-    lines.push(`Missing sale numbers: ${saleList}`);
+    const overflow = entries.length - maxListed;
+    lines.push(
+      overflow > 0
+        ? `Missing sale numbers: ${saleList} …and ${overflow} more`
+        : `Missing sale numbers: ${saleList}`
+    );
   }
 
   banner.textContent = lines.join("\n");
@@ -314,29 +332,51 @@ function showViewerError(message) {
 // ---------------------------------------------------------------------------
 
 async function loadPdfDocument(url) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
+
   try {
-    const response = await fetch(url);
+    const fetchInit = { signal: controller.signal };
+    if (/tiktok/i.test(url)) {
+      fetchInit.credentials = "include";
+    }
+
+    const response = await fetch(url, fetchInit);
     if (!response.ok) {
       throw new Error(`Failed to load PDF (${response.status})`);
     }
 
-    const data = await response.arrayBuffer();
+    const data = await readResponseArrayBuffer(response, PDF_FETCH_TIMEOUT_MS);
     if (!data.byteLength) {
       throw new Error("PDF_EMPTY");
     }
 
     return pdfjsLib.getDocument({ data }).promise;
   } catch (err) {
+    if (err?.name === "AbortError" || err?.message === "READ_TIMEOUT") {
+      throw new Error(
+        "PDF download timed out. Try reopening the packing list from TikTok Seller Center."
+      );
+    }
+
     if (url.startsWith("file://") && String(err).includes("Failed to fetch")) {
       throw new Error("LOCAL_FILE_BLOCKED");
     }
     throw err;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
 // ---------------------------------------------------------------------------
 // Page rendering
 // ---------------------------------------------------------------------------
+
+function scheduleRenderYield() {
+  return new Promise(resolve => {
+    requestAnimationFrame(() => setTimeout(resolve, 0));
+  });
+}
 
 async function renderAllPages(pdf, maps, matchStats) {
   const container = document.getElementById("pdfContainer");
@@ -350,9 +390,19 @@ async function renderAllPages(pdf, maps, matchStats) {
   const targetH = getLabelHeightPx();
   const renderW = targetW * getRenderScale();
   const renderH = targetH * getRenderScale();
+  const totalPages = pdf.numPages;
+  const includePdfTextInLayer = totalPages <= LARGE_PDF_TEXT_LAYER_PAGE_LIMIT;
   let renderedPages = 0;
 
-  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+  for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+    if (
+      pageNum === 1 ||
+      pageNum === totalPages ||
+      pageNum % RENDER_PROGRESS_INTERVAL === 0
+    ) {
+      setViewerLoading(true, `Rendering labels… ${pageNum}/${totalPages}`);
+    }
+
     try {
       await renderPage({
         pdf,
@@ -363,13 +413,16 @@ async function renderAllPages(pdf, maps, matchStats) {
         targetW,
         targetH,
         renderW,
-        renderH
+        renderH,
+        includePdfTextInLayer
       });
       renderedPages += 1;
     } catch (err) {
       console.error(`[TikTokPacker] Page ${pageNum} failed:`, err);
       appendPageError(container, pageNum, err);
     }
+
+    await scheduleRenderYield();
   }
 
   setupTextLayerObserver(container);
@@ -392,9 +445,26 @@ function setupTextLayerObserver(container) {
   if (typeof ResizeObserver === "undefined") return;
 
   textLayerObserver = new ResizeObserver(() => {
-    container.querySelectorAll(".pageContent").forEach(syncTextLayerScale);
+    if (textLayerObserver._rafId) {
+      cancelAnimationFrame(textLayerObserver._rafId);
+    }
+    textLayerObserver._rafId = requestAnimationFrame(() => {
+      textLayerObserver._rafId = 0;
+      container.querySelectorAll(".pageContent").forEach(syncTextLayerScale);
+    });
   });
   textLayerObserver.observe(container);
+
+  window.addEventListener(
+    "beforeunload",
+    () => {
+      if (textLayerObserver) {
+        textLayerObserver.disconnect();
+        textLayerObserver = null;
+      }
+    },
+    { once: true }
+  );
 }
 
 async function renderPage({
@@ -406,7 +476,8 @@ async function renderPage({
   targetW,
   targetH,
   renderW,
-  renderH
+  renderH,
+  includePdfTextInLayer
 }) {
   const page = await pdf.getPage(pageNum);
 
@@ -488,7 +559,8 @@ async function renderPage({
       viewport,
       searchOverlays,
       targetW,
-      targetH
+      targetH,
+      includePdfTextInLayer
     );
   } finally {
     try {
@@ -776,7 +848,8 @@ function attachSearchTextLayer(
   renderViewport,
   searchOverlays,
   targetW,
-  targetH
+  targetH,
+  includePdfText = true
 ) {
   const coordScale = targetW / renderViewport.width;
   const textLayer = document.createElement("div");
@@ -785,21 +858,23 @@ function attachSearchTextLayer(
   textLayer.style.width = `${targetW}px`;
   textLayer.style.height = `${targetH}px`;
 
-  for (const item of textContent.items) {
-    if (!item.str || !item.str.trim()) continue;
+  if (includePdfText) {
+    for (const item of textContent.items) {
+      if (!item.str || !item.str.trim()) continue;
 
-    const tx = pdfjsLib.Util.transform(renderViewport.transform, item.transform);
-    const fontHeight =
-      Math.hypot(tx[2], tx[3]) ||
-      (item.height || 12) * renderViewport.scale;
+      const tx = pdfjsLib.Util.transform(renderViewport.transform, item.transform);
+      const fontHeight =
+        Math.hypot(tx[2], tx[3]) ||
+        (item.height || 12) * renderViewport.scale;
 
-    appendSearchSpan(
-      textLayer,
-      item.str,
-      tx[4] * coordScale,
-      (tx[5] - fontHeight) * coordScale,
-      fontHeight * coordScale
-    );
+      appendSearchSpan(
+        textLayer,
+        item.str,
+        tx[4] * coordScale,
+        (tx[5] - fontHeight) * coordScale,
+        fontHeight * coordScale
+      );
+    }
   }
 
   for (const { text, bounds } of searchOverlays) {
@@ -864,64 +939,28 @@ function wrapTextLines(context, text, maxWidth) {
 function buildPageBitmap(sourceCanvas) {
   const targetW = getLabelWidthPx();
   const targetH = getLabelHeightPx();
-  const ctx = sourceCanvas.getContext("2d", {
-    alpha: false,
-    willReadFrequently: true
-  });
 
-  toThermalMonochrome(ctx, sourceCanvas.width, sourceCanvas.height);
-
-  if (sourceCanvas.width === targetW && sourceCanvas.height === targetH) {
+  if (
+    sourceCanvas.width === targetW &&
+    sourceCanvas.height === targetH
+  ) {
+    const ctx = sourceCanvas.getContext("2d", {
+      alpha: false,
+      willReadFrequently: true
+    });
+    toThermalMonochrome(ctx, targetW, targetH);
     return sourceCanvas;
   }
-
-  return downscaleMonochrome(sourceCanvas, targetW, targetH);
-}
-
-function downscaleMonochrome(sourceCanvas, targetW, targetH) {
-  const sw = sourceCanvas.width;
-  const sh = sourceCanvas.height;
-  const scaleX = sw / targetW;
-  const scaleY = sh / targetH;
-  const srcData = sourceCanvas
-    .getContext("2d", { willReadFrequently: true })
-    .getImageData(0, 0, sw, sh).data;
 
   const output = document.createElement("canvas");
   output.width = targetW;
   output.height = targetH;
 
   const outCtx = output.getContext("2d", { alpha: false });
-  const outData = outCtx.createImageData(targetW, targetH);
+  outCtx.imageSmoothingEnabled = false;
+  outCtx.drawImage(sourceCanvas, 0, 0, targetW, targetH);
+  toThermalMonochrome(outCtx, targetW, targetH);
 
-  for (let y = 0; y < targetH; y++) {
-    const y0 = Math.floor(y * scaleY);
-    const y1 = Math.min(Math.floor((y + 1) * scaleY), sh);
-
-    for (let x = 0; x < targetW; x++) {
-      const x0 = Math.floor(x * scaleX);
-      const x1 = Math.min(Math.floor((x + 1) * scaleX), sw);
-      let black = false;
-
-      for (let sy = y0; sy < y1 && !black; sy++) {
-        for (let sx = x0; sx < x1; sx++) {
-          if (srcData[(sy * sw + sx) * 4] < 128) {
-            black = true;
-            break;
-          }
-        }
-      }
-
-      const value = black ? 0 : 255;
-      const i = (y * targetW + x) * 4;
-      outData.data[i] = value;
-      outData.data[i + 1] = value;
-      outData.data[i + 2] = value;
-      outData.data[i + 3] = 255;
-    }
-  }
-
-  outCtx.putImageData(outData, 0, 0);
   return output;
 }
 

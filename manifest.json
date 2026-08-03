@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TikTok Packer",
-  "version": "1.8.3",
+  "version": "1.9.1",
   "description": "Overlay product names on TikTok Shop packing-list PDFs for thermal label printing.",
   "permissions": [
     "storage",

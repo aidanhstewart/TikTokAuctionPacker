@@ -22,6 +22,7 @@ const WORKBOOK_STORAGE_KEYS = [
 ];
 
 const SHEET_FETCH_TIMEOUT_MS = 15000;
+const PDF_FETCH_TIMEOUT_MS = 30000;
 const MAX_WORKBOOK_FILE_BYTES = 15 * 1024 * 1024;
 const MAX_STORED_WORKBOOK_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_LIVE_TITLE_PATTERNS = 6;
@@ -101,36 +102,51 @@ function spreadsheetExportXlsxUrl(url) {
   return `https://docs.google.com/spreadsheets/d/${id}/export?format=xlsx`;
 }
 
-async function fetchSpreadsheetWorkbookBuffer(url) {
+async function fetchSpreadsheetWorkbookBuffer(url, retries = 2) {
   const exportUrl = spreadsheetExportXlsxUrl(url);
   if (!exportUrl) {
     throw new Error("Invalid Google Spreadsheet URL.");
   }
 
-  const response = await fetchWithTimeout(exportUrl);
-  if (!response.ok) {
-    throw new Error(
-      "Could not download spreadsheet. Share it as 'Anyone with the link can view'."
-    );
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetchWithTimeout(exportUrl);
+      if (!response.ok) {
+        throw new Error(
+          "Could not download spreadsheet. Share it as 'Anyone with the link can view'."
+        );
+      }
+
+      const buffer = await readResponseArrayBuffer(response);
+      if (!buffer || buffer.byteLength === 0) {
+        throw new Error("Spreadsheet download was empty.");
+      }
+
+      if (buffer.byteLength > MAX_WORKBOOK_FILE_BYTES) {
+        throw new Error(
+          "Spreadsheet is too large. Try removing unused tabs or rows."
+        );
+      }
+
+      const header = new Uint8Array(buffer.slice(0, 4));
+      if (header[0] === 0x3c) {
+        throw new Error(
+          "Spreadsheet returned a web page, not Excel data. Check the URL and sharing settings."
+        );
+      }
+
+      return buffer;
+    } catch (err) {
+      lastError = err;
+      if (attempt < retries) {
+        await new Promise(resolve => setTimeout(resolve, 800 * (attempt + 1)));
+      }
+    }
   }
 
-  const buffer = await response.arrayBuffer();
-  if (!buffer || buffer.byteLength === 0) {
-    throw new Error("Spreadsheet download was empty.");
-  }
-
-  if (buffer.byteLength > MAX_WORKBOOK_FILE_BYTES) {
-    throw new Error("Spreadsheet is too large. Try removing unused tabs or rows.");
-  }
-
-  const header = new Uint8Array(buffer.slice(0, 4));
-  if (header[0] === 0x3c) {
-    throw new Error(
-      "Spreadsheet returned a web page, not Excel data. Check the URL and sharing settings."
-    );
-  }
-
-  return buffer;
+  throw lastError;
 }
 
 function arrayBufferToBase64(buffer) {
@@ -386,6 +402,7 @@ function rowsToSaleMap(rows, columnOverride) {
   const cols = columnOverride || getWorkbookColumnIndices();
   const map = {};
   let skippedRows = 0;
+  const duplicateSales = [];
 
   rows.slice(cols.headerRows).forEach(row => {
     if (!rowHasAnyCell(row)) return;
@@ -400,10 +417,14 @@ function rowsToSaleMap(rows, columnOverride) {
       return;
     }
 
+    if (map[saleNumber] !== undefined && map[saleNumber] !== productName) {
+      duplicateSales.push(saleNumber);
+    }
+
     map[saleNumber] = productName;
   });
 
-  return { map, skippedRows };
+  return { map, skippedRows, duplicateSales };
 }
 
 function mapLooksLikeAccidentalRowNumbers(map) {
@@ -560,6 +581,12 @@ function hasPendingItemChecks(stored) {
   return Boolean(stored?.workbookItemChecks?.length);
 }
 
+function hasBlockingItemChecks(stored) {
+  const itemChecks = getActiveSettings().itemChecks;
+  if (!itemChecks.enabled || !itemChecks.blockPacking) return false;
+  return Boolean(stored?.workbookItemChecks?.length);
+}
+
 // ---------------------------------------------------------------------------
 // Workbook tab mapping
 // ---------------------------------------------------------------------------
@@ -625,6 +652,11 @@ function buildWorkbookParseResult(tabReports) {
           `Tab "${report.tabName}": skipped ${report.skippedRows} row(s) missing sale # or product name.`
         );
       }
+      if (report.duplicateSales?.length) {
+        warnings.push(
+          `Tab "${report.tabName}": duplicate sale #(s) ${report.duplicateSales.slice(0, 5).join(", ")} — last row wins.`
+        );
+      }
       return;
     }
 
@@ -684,11 +716,11 @@ function formatWorkbookStatusSummary({
 }
 
 function getSetupStatus(stored) {
-  if (hasWorkbookMaps(stored) && hasPendingItemChecks(stored)) {
+  if (hasWorkbookMaps(stored) && hasBlockingItemChecks(stored)) {
     return {
       mode: "workbook-blocked",
       ready: false,
-      label: `Item checks required in column ${getActiveSettings().workbook.itemCheckColumn}`
+      label: `Item checks required in column ${getEffectiveWorkbookSettings().itemCheckColumn}`
     };
   }
 
@@ -923,15 +955,24 @@ function csvTextToSaleMap(csv) {
   return rowsToSaleMap(csvTextToRows(csv)).map;
 }
 
-async function fetchWithTimeout(url, timeoutMs = SHEET_FETCH_TIMEOUT_MS) {
+async function fetchWithTimeout(url, timeoutMs = SHEET_FETCH_TIMEOUT_MS, init = {}) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+async function readResponseArrayBuffer(response, timeoutMs = SHEET_FETCH_TIMEOUT_MS) {
+  return Promise.race([
+    response.arrayBuffer(),
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("READ_TIMEOUT")), timeoutMs);
+    })
+  ]);
 }
 
 async function fetchSheetCsv(url) {
@@ -1099,6 +1140,7 @@ async function getPendingItemChecks(stored) {
 }
 
 async function assertNoPendingItemChecks(stored) {
+  if (!getActiveSettings().itemChecks.enabled) return;
   if (!getActiveSettings().itemChecks.blockPacking) return;
 
   const itemChecks = await getPendingItemChecks(stored);
@@ -1124,6 +1166,18 @@ async function resolveSheetMaps(stored) {
   }
 
   return loadSheetMapsFromUrls(urls);
+}
+
+async function storageGet(keys) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get(keys, result => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(result);
+    });
+  });
 }
 
 async function storageSet(values) {

@@ -5,7 +5,7 @@
 **Turn TikTok Shop packing-list PDFs into print-ready 4×6 thermal labels — with product names pulled straight from your spreadsheet.**
 
 [![Chrome Extension](https://img.shields.io/badge/Chrome-MV3-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white)](https://developer.chrome.com/docs/extensions/mv3/)
-[![Version](https://img.shields.io/badge/version-1.8.3-00f2ea?style=for-the-badge)](manifest.json)
+[![Version](https://img.shields.io/badge/version-1.9.1-00f2ea?style=for-the-badge)](manifest.json)
 [![TikTok Shop](https://img.shields.io/badge/built%20for-TikTok%20Live-000000?style=for-the-badge&logo=tiktok&logoColor=white)](https://seller.tiktok.com/)
 
 *No server. No subscription. Your data stays in the browser.*

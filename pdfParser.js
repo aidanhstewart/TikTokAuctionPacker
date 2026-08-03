@@ -28,7 +28,7 @@ function groupTextItemsByRow(items, tolerance) {
   for (const item of sorted) {
     const y = item.transform[5];
 
-    if (!current || Math.abs(current.y - y) > tolerance) {
+    if (!current || Math.abs(current.y - y) > rowTolerance) {
       current = { y, items: [item] };
       rows.push(current);
     } else {
@@ -80,8 +80,21 @@ function findColumnX(headerRow, label) {
 // Table layout
 // ---------------------------------------------------------------------------
 
+function filterValidTextItems(items) {
+  return (items || []).filter(
+    item =>
+      item?.str &&
+      Array.isArray(item.transform) &&
+      item.transform.length >= 6 &&
+      Number.isFinite(item.transform[4]) &&
+      Number.isFinite(item.transform[5])
+  );
+}
+
 function getTableColumnLayout(textContent) {
-  const items = textContent.items.filter(item => item.str && item.str.trim());
+  const items = filterValidTextItems(
+    textContent.items.filter(item => item.str && item.str.trim())
+  );
 
   const sellerSkuLabel = findLabelItem(items, /Seller\s*SKU/i);
   const skuLabel = items.find(item => {
@@ -177,7 +190,9 @@ function detectSheetIndexFromTitle(titleText, titleLines, pageSheetIndex, lastDe
 // ---------------------------------------------------------------------------
 
 function parseTikTokPackingItems(textContent) {
-  const items = textContent.items.filter(item => item.str && item.str.trim());
+  const items = filterValidTextItems(
+    textContent.items.filter(item => item.str && item.str.trim())
+  );
   const layout = getTableColumnLayout(textContent);
   const sellerSkuLabel = findLabelItem(items, /Seller\s*SKU/i);
 

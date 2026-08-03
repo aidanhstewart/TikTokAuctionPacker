@@ -53,7 +53,8 @@ function parseWorkbookBuffer(arrayBuffer) {
     const liveIndex = liveIndexFromTabName(tabName, liveTabPosition);
     const workbookSettings = getEffectiveWorkbookSettings();
     const parsed = parseTabSaleMap(rows, workbookSettings);
-    const { map, skippedRows, itemCheckRows, detectedColumns } = parsed;
+    const { map, skippedRows, itemCheckRows, detectedColumns, duplicateSales } =
+      parsed;
 
     if (Object.keys(map).length === 0) {
       const saleCol = workbookSettings.saleColumn;
@@ -76,6 +77,7 @@ function parseWorkbookBuffer(arrayBuffer) {
       map,
       skippedRows,
       itemCheckRows,
+      duplicateSales,
       rowCount: Object.keys(map).length,
       detectedColumns,
       suspiciousRowNumbers: mapLooksLikeAccidentalRowNumbers(map)
@@ -180,11 +182,23 @@ async function importConfigBackup(backup) {
     [SETTINGS_STORAGE_KEY]: mergeSettings(backup.extensionSettings || {})
   };
 
-  if (backup.spreadsheetUrl) payload.spreadsheetUrl = backup.spreadsheetUrl;
-  if (backup.workbookFileName) payload.workbookFileName = backup.workbookFileName;
-  if (backup.workbookFileData) payload.workbookFileData = backup.workbookFileData;
-  if (backup.workbookMaps) payload.workbookMaps = backup.workbookMaps;
-  if (backup.workbookUpdatedAt) payload.workbookUpdatedAt = backup.workbookUpdatedAt;
+  if (backup.spreadsheetUrl) payload.spreadsheetUrl = String(backup.spreadsheetUrl);
+  if (backup.workbookFileName) {
+    payload.workbookFileName = String(backup.workbookFileName);
+  }
+  if (backup.workbookFileData) {
+    payload.workbookFileData = String(backup.workbookFileData);
+  }
+  if (backup.workbookMaps) {
+    const sanitizedMaps = sanitizeWorkbookMaps(backup.workbookMaps);
+    if (!sanitizedMaps) {
+      throw new Error("Backup workbook data is invalid or empty.");
+    }
+    payload.workbookMaps = sanitizedMaps;
+  }
+  if (backup.workbookUpdatedAt) {
+    payload.workbookUpdatedAt = Number(backup.workbookUpdatedAt) || Date.now();
+  }
 
   await storageSet(payload);
   loadSettings(payload);

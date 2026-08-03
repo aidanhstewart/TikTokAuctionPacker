@@ -38,7 +38,7 @@ const DEFAULT_SETTINGS = {
     enabled: true,
     hostPattern: "tiktok",
     extraUrlContains: "oec_fulfillment_doc",
-    interceptLocalPdfs: true
+    interceptLocalPdfs: false
   },
   itemChecks: {
     enabled: true,
@@ -139,7 +139,8 @@ function mergeSettings(raw) {
     },
     redirect: {
       enabled: normalizeBool(redirect.enabled, true),
-      hostPattern: normalizeString(redirect.hostPattern, "tiktok"),
+      hostPattern:
+        normalizeString(redirect.hostPattern, "tiktok") || "tiktok",
       extraUrlContains: normalizeString(
         redirect.extraUrlContains,
         "oec_fulfillment_doc"

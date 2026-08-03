@@ -9,6 +9,9 @@ const MAX_TRACKED_REDIRECTS = 200;
 /** @type {Map<string, number>} */
 const redirectedTabs = new Map();
 
+/** @type {Set<string>} */
+const redirectInFlight = new Set();
+
 function stripUrlParams(url) {
   return url.split("?")[0].split("#")[0].toLowerCase();
 }
@@ -20,12 +23,13 @@ function isPdfUrl(url) {
 }
 
 function urlMatchesHostPattern(url, pattern) {
-  if (!pattern) return true;
+  const value = String(pattern || "").trim();
+  if (!value) return /tiktok/i.test(url);
 
   try {
-    return new RegExp(pattern, "i").test(url);
+    return new RegExp(value, "i").test(url);
   } catch {
-    return url.toLowerCase().includes(pattern.toLowerCase());
+    return url.toLowerCase().includes(value.toLowerCase());
   }
 }
 
@@ -90,11 +94,17 @@ function redirectToViewer(tabId, pdfUrl) {
   if (!Number.isInteger(tabId) || tabId < 0) return;
   if (!pdfUrl || wasRecentlyRedirected(tabId, pdfUrl)) return;
 
+  const flightKey = `${tabId}:${pdfUrl}`;
+  if (redirectInFlight.has(flightKey)) return;
+
+  redirectInFlight.add(flightKey);
   markRedirected(tabId, pdfUrl);
 
   chrome.tabs.update(tabId, { url: buildViewerUrl(pdfUrl) }, () => {
+    redirectInFlight.delete(flightKey);
+
     if (chrome.runtime.lastError) {
-      redirectedTabs.delete(`${tabId}:${pdfUrl}`);
+      redirectedTabs.delete(flightKey);
       console.warn("[TikTokPacker] Redirect failed:", chrome.runtime.lastError.message);
     }
   });
@@ -108,7 +118,15 @@ function handleNavigation(tabId, url) {
 
 function withSettings(callback) {
   chrome.storage.local.get(SETTINGS_STORAGE_KEY, stored => {
-    loadSettings(stored);
+    if (chrome.runtime.lastError) {
+      console.warn(
+        "[TikTokPacker] Settings read failed:",
+        chrome.runtime.lastError.message
+      );
+      loadSettings({});
+    } else {
+      loadSettings(stored);
+    }
     callback();
   });
 }

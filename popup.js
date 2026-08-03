@@ -220,11 +220,14 @@ function renderWorkbookStatus(stored) {
 
   if (hasPendingItemChecks(stored)) {
     lines.push("", formatItemCheckBlockMessage(stored.workbookItemChecks));
+    if (!getActiveSettings().itemChecks.blockPacking) {
+      lines.push("", "Item checks are enabled but packing is not blocked.");
+    }
   }
 
-  const variant = hasPendingItemChecks(stored)
+  const variant = hasBlockingItemChecks(stored)
     ? "blocked"
-    : stored.workbookWarnings?.length
+    : stored.workbookWarnings?.length || hasPendingItemChecks(stored)
       ? "warn"
       : "";
 
